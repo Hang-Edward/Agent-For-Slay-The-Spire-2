@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import requests
 from typing import Optional
-from ..state.game_state import GameState
+from state.game_state import GameState
 from .protocol import Decision
 
 

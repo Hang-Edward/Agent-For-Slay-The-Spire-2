@@ -3,8 +3,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
-from ..state.game_state import GameState, Card, Monster
-from ..communication.protocol import Decision
+from state.game_state import GameState, Card, Monster
+from communication.protocol import Decision
 
 
 @dataclass

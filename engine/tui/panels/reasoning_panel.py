@@ -11,7 +11,7 @@ from rich.console import Group
 from rich.table import Table
 from rich.layout import Layout
 
-from ...communication.protocol import Decision
+from communication.protocol import Decision
 
 
 class ReasoningPanel:

@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.layout import Layout
 
-from ...state.game_state import GameState
+from state.game_state import GameState
 
 
 class StatePanel:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from ..communication.protocol import Decision
+from communication.protocol import Decision
 
 
 def parse_llm_response(response: str) -> Decision:

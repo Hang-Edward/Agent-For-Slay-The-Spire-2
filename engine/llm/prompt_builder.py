@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Optional
-from ..state.game_state import GameState, Monster, Card
+from state.game_state import GameState, Monster, Card
 
 
 # Intent descriptions to help the LLM understand enemy behavior

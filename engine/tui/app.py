@@ -14,12 +14,12 @@ from rich.table import Table
 from rich.text import Text
 from rich.align import Align
 
-from ..state.game_state import GameState
-from ..communication.protocol import Decision
+from state.game_state import GameState
+from communication.protocol import Decision
 from .panels.state_panel import StatePanel
 from .panels.reasoning_panel import ReasoningPanel
 from .panels.strategy_panel import StrategyPanel
-from ..skills.model import SkillsRegistry
+from skills.model import SkillsRegistry
 
 
 class TUIApp:

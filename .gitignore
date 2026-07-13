@@ -6,8 +6,8 @@ mod/libs/*.jar
 *.class
 
 # Python
-engine/__pycache__/
-engine/*.pyc
+__pycache__/
+*.pyc
 engine/.venv/
 engine/venv/
 *.egg-info/
