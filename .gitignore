@@ -1,0 +1,33 @@
+# Java Mod
+mod/build/
+mod/.gradle/
+mod/bin/
+mod/libs/*.jar
+*.class
+
+# Python
+engine/__pycache__/
+engine/*.pyc
+engine/.venv/
+engine/venv/
+*.egg-info/
+
+# Config with secrets
+config/api_key.yaml
+config/local.yaml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log

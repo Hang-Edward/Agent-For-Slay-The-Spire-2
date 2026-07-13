@@ -1,0 +1,39 @@
+# Slay the Spire AI Agent — Configuration
+# Mod settings
+mod:
+  host: "127.0.0.1"
+  port: 18888
+
+# LLM settings
+llm:
+  model: "deepseek-chat"
+  temperature: 0.3
+  max_tokens: 128
+
+# Strategy configuration
+strategy:
+  # Current preset: balanced, aggressive, defensive, setup, or "custom"
+  preset: "balanced"
+
+  # Individual skill toggles (overrides preset)
+  skills:
+    focus_fire: false
+    block_when_attacked: false
+    save_potions: false
+    no_overkill: false
+    setup_first: false
+    aoe_priority: false
+    conserve_energy: false
+    aggressive: false
+    elite_path: false
+
+# Custom user-defined skills
+# Each skill is a concrete instruction injected into the LLM prompt
+custom_skills:
+  # Example: my_custom_playstyle:
+  #   name: "My Custom Style"
+  #   description: "description of the skill"
+  #   prompt_instruction: "instruction for the LLM"
+  #   category: "combat"
+  #   priority: 10
+  #   enabled: true

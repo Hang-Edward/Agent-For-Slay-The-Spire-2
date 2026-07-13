@@ -1,0 +1,7 @@
+# DeepSeek API Key Configuration
+# Copy this file to api_key.yaml and fill in your key
+# Or set the DEEPSEEK_API_KEY environment variable instead
+
+llm:
+  api_key: "sk-your-deepseek-api-key-here"
+  model: "deepseek-chat"
