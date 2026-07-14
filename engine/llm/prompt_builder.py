@@ -26,10 +26,10 @@ INTENT_DESCRIPTIONS = {
 def describe_intent(monster: Monster) -> str:
     base = INTENT_DESCRIPTIONS.get(monster.intent, "has unknown intent")
     if monster.intent_damage > 0:
-        hits = monster.intent_hits if monster.intent_hits > 1 else ""
         dmg_detail = f" for {monster.intent_damage} damage"
-        if hits:
-            dmg_detail += f" ({monster.intent_hits} hits)"
+        if monster.intent_hits > 1:
+            total = monster.intent_damage * monster.intent_hits
+            dmg_detail += f" x {monster.intent_hits} hits ({total} total)"
         base += dmg_detail
     if monster.block > 0:
         base += f" with {monster.block} block"
@@ -75,18 +75,26 @@ def build_combat_prompt(state: GameState, strategy_instructions: str = "") -> st
     prompt_parts = []
 
     # System preamble
-    prompt_parts.append("""You are an expert Slay the Spire AI. You are playing a combat round.
-Your goal is to choose the optimal card to play, or end the turn.
-Think step by step about the situation, then output your decision.
+    prompt_parts.append("""You are an expert Slay the Spire AI. Your task is to choose the optimal card to play.
 
-OUTPUT FORMAT (one line only):
+Think step by step:
+1. Assess the threat: how much damage will you take if you don't block?
+2. Check your resources: energy, HP, block, hand cards
+3. Evaluate each playable card: what's the best use of your energy?
+4. Pick the best action
+
+Then output your decision on the LAST line.
+
+OUTPUT FORMAT (last line only):
 - To play a card: PLAY <hand_index> <monster_index>
+- To use a potion: POTION <slot> <monster_index>
 - To end your turn: END
 
 Example: PLAY 0 0  (play hand card 0 on monster 0)
+Example: POTION 1 0 (use potion slot 1 on monster 0)
 Example: END       (end the turn)
 
-IMPORTANT: Only output the command. No other text.
+Your reasoning can go before the final command, but the last line MUST be the command.
 """)
 
     # Strategy instructions from skills system
@@ -110,15 +118,20 @@ IMPORTANT: Only output the command. No other text.
     if state.potions:
         potion_info = []
         for pot in state.potions:
-            if pot:
-                potion_info.append(f"{pot.get('name', '?')} (slot {pot.get('slot', 0)})")
+            if pot and pot.get("can_use", False):
+                target = pot.get("target_type", "")
+                description = pot.get("description", "")
+                detail = f", effect: {description}" if description else ""
+                potion_info.append(f"{pot.get('name', '?')} (slot {pot.get('slot', 0)}, target: {target}{detail})")
         if potion_info:
             prompt_parts.append(f"- Potions: {', '.join(potion_info)}\n")
 
     # Monsters
     prompt_parts.append("\n## Monsters\n")
-    for i, mon in enumerate(state.alive_monsters):
-        prompt_parts.append(f"  [{i}] {mon.name} | HP: {mon.current_hp}/{mon.max_hp} | Block: {mon.block}")
+    for fallback_index, mon in enumerate(state.alive_monsters):
+        target_index = mon.target_index if mon.target_index >= 0 else fallback_index
+        target_label = str(target_index) if mon.targetable else "not targetable"
+        prompt_parts.append(f"  [{target_label}] {mon.name} | HP: {mon.current_hp}/{mon.max_hp} | Block: {mon.block}")
         prompt_parts.append(f"       Intent: {describe_intent(mon)}")
         if mon.powers:
             prompt_parts.append(f"       Powers: {format_powers(mon.powers)}")
@@ -128,13 +141,15 @@ IMPORTANT: Only output the command. No other text.
     prompt_parts.append("\n## Your Hand\n")
     playable_count = 0
     for i, card in enumerate(state.hand):
-        playable = card.is_playable and card.cost <= state.player_energy
+        playable = card.is_playable and card.cost_for_turn <= state.player_energy
         if playable:
             playable_count += 1
-        energy_str = f"{card.cost}" + (" (upgraded)" if card.upgrades > 0 else "")
-        marker = " [AVAILABLE]" if playable else " [NOT ENOUGH ENERGY]" if card.cost > state.player_energy else ""
+        energy_str = f"{card.cost_for_turn}" + (" (upgraded)" if card.upgrades > 0 else "")
+        marker = " [AVAILABLE]" if playable else f" [UNPLAYABLE: {card.playable_reason or 'unknown'}]"
         effect = format_card_effect(card)
         prompt_parts.append(f"  [{i}] {card.name} | Cost: {energy_str} | Type: {card.card_type}{marker}")
+        if card.target_type:
+            prompt_parts.append(f"       Target: {card.target_type}")
         prompt_parts.append(f"       Effect: {effect}")
         prompt_parts.append("")
 
@@ -157,6 +172,6 @@ IMPORTANT: Only output the command. No other text.
     # Available actions summary
     prompt_parts.append(f"\n## Available Actions")
     prompt_parts.append(f"You have {state.player_energy} energy and {playable_count} playable cards.")
-    prompt_parts.append(f"Decide which card to play (PLAY <idx> <monster_idx>) or END the turn.")
+    prompt_parts.append(f"Decide which card to play (PLAY <idx> <monster_idx>), potion to use (POTION <slot> <monster_idx>), or END the turn.")
 
     return "\n".join(prompt_parts)

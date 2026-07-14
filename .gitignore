@@ -1,9 +1,6 @@
-# Java Mod
-mod/build/
-mod/.gradle/
+# Godot/.NET Mod (STS2)
 mod/bin/
-mod/libs/*.jar
-*.class
+mod/obj/
 
 # Python
 __pycache__/

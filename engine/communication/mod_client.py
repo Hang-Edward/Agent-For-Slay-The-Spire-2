@@ -40,8 +40,11 @@ class ModClient:
                 json=decision.to_json(),
                 timeout=self.timeout,
             )
-            return resp.status_code == 200
-        except (requests.ConnectionError, requests.Timeout):
+            if resp.status_code != 200:
+                return False
+            data = resp.json()
+            return data.get("status") == "ok"
+        except (requests.ConnectionError, requests.Timeout, ValueError):
             return False
 
     def get_status(self) -> dict:

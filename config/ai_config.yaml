@@ -6,9 +6,13 @@ mod:
 
 # LLM settings
 llm:
+  # Backend: deepseek, ollama, claude
+  backend: "deepseek"
   model: "deepseek-chat"
   temperature: 0.3
   max_tokens: 128
+  # Ollama: set ollama_url if using local LLM
+  # ollama_url: "http://localhost:11434"
 
 # Strategy configuration
 strategy:

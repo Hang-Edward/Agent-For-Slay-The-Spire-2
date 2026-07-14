@@ -9,8 +9,10 @@ from typing import Optional
 
 import requests
 
+from .base import BaseLLMClient, LLMRequestError
 
-class DeepSeekClient:
+
+class DeepSeekClient(BaseLLMClient):
     """Client for DeepSeek API."""
 
     API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -21,7 +23,7 @@ class DeepSeekClient:
         self.last_response = ""
         self.last_raw = ""
 
-    def think(self, prompt: str, temperature: float = 0.3, max_tokens: int = 128) -> str:
+    def think(self, prompt: str, temperature: float = 0.3, max_tokens: int = 128) -> tuple[str, float]:
         """Send a prompt to DeepSeek and get the response."""
         start = time.time()
 
@@ -53,12 +55,16 @@ class DeepSeekClient:
             self.last_response = content
             self.last_raw = json.dumps(data, indent=2)
         except Exception as e:
-            content = f"ERROR: {e}"
             self.last_response = ""
             self.last_raw = str(e)
+            raise LLMRequestError(f"DeepSeek request failed: {e}") from e
 
         elapsed = time.time() - start
         return content, elapsed
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def name(self) -> str:
+        return f"DeepSeek ({self.model})"

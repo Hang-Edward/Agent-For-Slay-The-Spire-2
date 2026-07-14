@@ -2,26 +2,27 @@
 """
 Slay the Spire AI Agent — Main Entry Point
 
-Connects to the Java Mod via HTTP,
-calls DeepSeek V4 Flash for decisions,
+Connects to the Godot/.NET Mod via HTTP (or runs in --mock mode),
+dispatches decisions based on screen type (combat, card reward, rest, event),
 and displays everything in a real-time TUI.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import signal
 import sys
 import time
-import signal
-import threading
 
 from communication.mod_client import ModClient
-from llm.prompt_builder import build_combat_prompt
-from llm.deepseek_client import DeepSeekClient
-from llm.response_parser import parse_llm_response
 from communication.protocol import Decision
-from state.game_state import GameState
+from llm.base import LLMRequestError
+from llm.factory import create_llm_client
+from llm.response_parser import InvalidDecisionError
+from decisions.registry import get_default_registry, DecisionRegistry
 from skills.model import SkillsRegistry
 from skills.loader import load_skills_from_config
 from trace.decision_trace import DecisionStep
@@ -37,14 +38,43 @@ class AIAgent:
         mod_host: str = "127.0.0.1",
         mod_port: int = 18888,
         api_key: str = "",
-        model: str = "deepseek-chat",
+        model: str = "",
         config_path: str = "",
+        backend: str = "deepseek",
+        mock: bool = False,
+        mock_file: str = "",
+        dry_run: bool = False,
     ):
-        self.client = ModClient(mod_host, mod_port)
-        self.llm = DeepSeekClient(api_key, model)
+        # ── 客户端 ──────────────────────────────────────────
+        self._mock_mode = mock
+        self._dry_run = dry_run
+        if mock:
+            from tests.mock_mod_client import MockModClient
+            self.client = MockModClient()
+            if mock_file:
+                self.client.load_fixture(mock_file)
+        else:
+            self.client = ModClient(mod_host, mod_port)
+
+        # ── LLM ─────────────────────────────────────────────
+        try:
+            self.llm = create_llm_client(
+                backend=backend,
+                api_key=api_key,
+                model=model,
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+
+        # ── 决策处理器 ──────────────────────────────────────
+        self.registry: DecisionRegistry = get_default_registry()
+
+        # ── TUI ─────────────────────────────────────────────
         self.tui = TUIApp()
 
-        # Load skills
+        # ── Skills ──────────────────────────────────────────
         self.skills_registry = SkillsRegistry()
         if config_path and os.path.exists(config_path):
             try:
@@ -52,30 +82,38 @@ class AIAgent:
             except Exception as e:
                 print(f"Warning: Failed to load config: {e}")
 
+        # ── 追踪 ────────────────────────────────────────────
         self.trace_logger = TraceLogger()
-        self.last_turn = -1
-        self.last_state_hash = ""
+
+        # ── 状态追踪 ────────────────────────────────────────
         self.running = False
-        self.in_combat = False
-        self.current_state: GameState | None = None
+        self.current_state_raw: dict | None = None
+        self.last_screen_id: str = ""       # 用于避免重复决策
+        self.mock_file_list: list[str] = []  # mock 多文件模式
+
+    # ─── 公共接口 ───────────────────────────────────────────
 
     def start(self):
-        """Start the AI agent main loop."""
+        """启动 AI Agent 主循环。"""
         if not self.llm.is_configured():
-            print("ERROR: DeepSeek API key not configured.")
-            print("Set DEEPSEEK_API_KEY environment variable or pass --api-key")
+            print(f"ERROR: {self.llm.name} is not configured.")
+            print("Check your API key or backend settings.")
             sys.exit(1)
 
         self.running = True
         self.tui.start()
 
-        # Quick connection status display
-        connected = self.client.is_connected()
-        self.tui.set_status(
-            f"{'Connected' if connected else 'Disconnected — waiting for mod...'} "
-            f"({self.client.base_url})",
-            connected=connected,
-        )
+        # 初始化连接状态
+        if self._mock_mode:
+            connected = True
+            self.tui.set_status(f"Mock mode ({self.llm.name})", connected=True)
+        else:
+            connected = self.client.is_connected()
+            self.tui.set_status(
+                f"{'Connected' if connected else 'Disconnected — waiting for mod...'} "
+                f"({self.client.base_url})",
+                connected=connected,
+            )
 
         try:
             self._main_loop()
@@ -84,157 +122,229 @@ class AIAgent:
         finally:
             self.tui.stop()
 
+    def stop(self):
+        """停止 AI Agent。"""
+        self.running = False
+
+    # ─── 主循环 ─────────────────────────────────────────────
+
     def _main_loop(self):
-        """Main loop: poll mod state, make decisions when needed."""
+        """主循环：轮询游戏状态，根据屏幕类型分派决策。"""
         while self.running:
-            # Check mod connection
-            status = self.client.get_status()
-            connected = status.get("in_game", False)
-
-            if not connected:
-                self.tui.set_status("Waiting for game/mod connection...", False)
-                self.tui.refresh()
-                time.sleep(1)
-                continue
-
-            self.tui.set_status("Connected — monitoring combat...", True)
-
-            # Get full state
+            # 获取状态
             state = self.client.get_state()
             if state is None:
                 time.sleep(0.2)
                 continue
 
-            self.current_state = state
+            self.current_state_raw = state.raw if hasattr(state, 'raw') else {}
             self.tui.update_state(state)
 
-            # Check if we're in active combat needing a decision
-            if self._should_make_decision(state):
-                self._make_decision(state)
+            # 根据屏幕类型找到对应的决策处理器
+            handler = self.registry.get_handler_for_state(self.current_state_raw)
+            if handler is not None:
+                state_data = handler.extract_state(self.current_state_raw)
+                screen_id = self._compute_screen_id(
+                    handler.screen_type, state_data
+                )
 
-            # Update TUI
-            self.tui.set_status(
-                f"Connected — {'In combat (turn ' + str(state.turn) + ')' if state.in_combat else 'Exploring'} "
-                f"| Act {state.act} Floor {state.floor}",
-                connected=True,
+                # 如果屏幕状态发生变化，需要做新决策
+                if screen_id != self.last_screen_id and handler.should_act(state_data):
+                    self._make_decision(state, handler, state_data)
+                    self.last_screen_id = screen_id
+
+            # 更新 TUI 状态栏
+            screen = self.current_state_raw.get("screen_type", "?")
+            in_combat = self.current_state_raw.get("in_combat", False)
+            turn = state.turn if hasattr(state, 'turn') else 0
+            act = state.act if hasattr(state, 'act') else 1
+            floor = state.floor if hasattr(state, 'floor') else 1
+
+            mode_name = self.llm.name
+            status = (
+                f"[{screen}] {mode_name}"
+                f" | {'Turn ' + str(turn) if in_combat else ''}"
+                f" | Act {act} Floor {floor}"
             )
+            self.tui.set_status(status, connected=True)
             self.tui.refresh()
 
-            # Throttle polling
             time.sleep(0.3)
 
-    def _should_make_decision(self, state: GameState) -> bool:
-        """Check if the AI needs to make a decision."""
-        if not state.in_combat:
-            self.in_combat = False
-            return False
+    # ─── 决策 ───────────────────────────────────────────────
 
-        if not state.hand:
-            return False
-
-        # Don't act on dead monsters / empty battle
-        if not state.alive_monsters:
-            return False
-
-        # Check if turn changed - new turn needs new decisions
-        if state.turn != self.last_turn:
-            self.last_turn = state.turn
-            self.last_state_hash = ""
-            return True
-
-        # Check if hand state changed (card was played, drew new cards)
-        state_hash = self._hash_state(state)
-        if state_hash != self.last_state_hash and any(c.is_playable and c.cost <= state.player_energy for c in state.hand):
-            self.last_state_hash = state_hash
-            return True
-
-        return False
-
-    def _hash_state(self, state: GameState) -> str:
-        """Create a hash to detect meaningful state changes."""
-        hand_info = "|".join(f"{c.uuid}:{c.cost}:{c.is_playable}" for c in state.hand)
-        monster_info = "|".join(f"{m.monster_id}:{m.current_hp}:{m.block}" for m in state.monsters)
-        return f"{hand_info}||{monster_info}||{state.player_block}||{state.player_energy}"
-
-    def _make_decision(self, state: GameState):
-        """Make a combat decision using the LLM."""
+    def _make_decision(self, state, handler, state_data):
+        """执行一次决策：构建 Prompt → 调用 LLM → 解析 → 执行。"""
         start_time = time.time()
 
-        # Get skill instructions
+        # 获取 Skills 策略指令
         strategy_instructions = self.skills_registry.get_enabled_instructions()
         enabled_skill_names = [s.name for s in self.skills_registry.enabled_skills]
 
-        # Build prompt
-        prompt = build_combat_prompt(state, strategy_instructions)
-        self.tui.update_reasoning("Calling DeepSeek API...")
+        # 构建 Prompt
+        prompt = handler.build_prompt(state_data, strategy_instructions)
+        self.tui.update_reasoning(f"{handler.screen_type}: Calling LLM...")
 
-        # Show prompt in trace
+        # 追踪记录
         step = DecisionStep(
-            turn=state.turn,
+            turn=getattr(state, 'turn', 0),
             prompt=prompt,
             llm_response="",
             decision=Decision.end_turn(),
             reasoning="Thinking...",
         )
 
-        # Call LLM
-        response, elapsed = self.llm.think(prompt)
-        elapsed_ms = int(elapsed * 1000)
+        # 尝试自动决策（跳过 LLM）
+        auto_decision = handler.try_auto_decision(state_data)
+        if auto_decision is not None:
+            response = auto_decision.to_llm_format()
+            elapsed_ms = 0
+            decision = auto_decision
+            reasoning = f"[auto] {response}"
+            self.tui.update_reasoning(reasoning)
+            self.tui.add_decision(response, decision, 0)
+            self.tui.refresh()
+            step.llm_response = response
+            step.decision = decision
+            step.elapsed_ms = 0
+            self.trace_logger.add_step(step)
+            print(f"\n[{handler.screen_type}] Auto: {decision}")
+            if not self.client.post_decision(decision):
+                self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
+            return
 
-        # Parse response
-        decision = parse_llm_response(response)
+        # 调用 LLM
+        try:
+            response, elapsed = self.llm.think(prompt)
+            elapsed_ms = int(elapsed * 1000)
 
-        # Show reasoning in TUI
-        reasoning = f"LLM responded in {elapsed_ms}ms: {response[:100]}"
+            # 解析并校验响应；异常时本次状态不执行任何动作。
+            decision = handler.parse_response(response, state_data)
+        except (LLMRequestError, InvalidDecisionError) as error:
+            message = f"[{handler.screen_type}] Decision stopped: {error}"
+            self.tui.update_reasoning(message)
+            self.tui.refresh()
+            step.reasoning = message
+            step.llm_response = locals().get("response", "")
+            self.trace_logger.add_step(step)
+            print(f"\n{message}")
+            return
+
+        # 更新 TUI
+        reasoning = f"[{handler.screen_type}] LLM ({elapsed_ms}ms): {response[:100]}"
         self.tui.update_reasoning(reasoning)
         self.tui.add_decision(response, decision, elapsed_ms)
         self.tui.refresh()
 
-        # Record trace
+        # 记录追踪
         step.llm_response = response
         step.decision = decision
         step.elapsed_ms = elapsed_ms
         self.trace_logger.add_step(step)
 
-        print(f"\n[Turn {state.turn}] LLM: {response.strip()} → Decision: {decision} ({elapsed_ms}ms)")
+        print(f"\n[{handler.screen_type}] LLM: {response.strip()} → {decision} ({elapsed_ms}ms)")
 
-        # Send decision
-        if decision.type == "end_turn":
-            self.client.post_decision(decision)
-            self.last_turn = state.turn  # Don't re-act on same turn after end
-        else:
-            # For card plays, send and wait for state change
-            self.client.post_decision(decision)
-            self.last_state_hash = ""  # Force re-evaluation after action
+        # 发送决策
+        if not self.client.post_decision(decision):
+            self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
 
-    def stop(self):
-        """Stop the AI agent."""
-        self.running = False
+    # ─── 辅助方法 ───────────────────────────────────────────
 
+    def _compute_screen_id(self, screen_type: str, state_data: dict) -> str:
+        """为当前屏幕生成唯一 ID，用于判断是否需要新决策。"""
+        # 战斗屏幕：基于手牌和怪物状态计算
+        if screen_type == "COMBAT":
+            gs = state_data.get("game_state")
+            if gs:
+                if gs.state_revision > 0:
+                    return f"combat:{gs.state_revision}"
+                raw = (
+                    f"{gs.turn}|"
+                    f"{'|'.join(f'{c.uuid}:{c.cost_for_turn}:{c.is_playable}' for c in gs.hand)}|"
+                    f"{'|'.join(f'{m.monster_id}:{m.current_hp}:{m.block}' for m in gs.monsters)}|"
+                    f"{gs.player_block}|{gs.player_energy}"
+                )
+                return hashlib.md5(raw.encode()).hexdigest()
+
+        # 其他屏幕：基于状态数据的简单哈希
+        raw = json.dumps(state_data, sort_keys=True, default=str)
+        return hashlib.md5(raw.encode()).hexdigest()
+
+
+# ─── Entry Point ──────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Slay the Spire AI Agent")
     parser.add_argument("--host", default="127.0.0.1", help="Mod HTTP server host")
     parser.add_argument("--port", type=int, default=18888, help="Mod HTTP server port")
-    parser.add_argument("--api-key", default="", help="DeepSeek API key")
-    parser.add_argument("--model", default="deepseek-chat", help="DeepSeek model name")
+    parser.add_argument("--api-key", default="", help="API key for the LLM backend")
+    parser.add_argument("--model", default="", help="Model name override")
+    parser.add_argument("--backend", default="", help="LLM backend: deepseek, ollama, claude")
     parser.add_argument(
         "--config",
         default=os.path.join(os.path.dirname(__file__), "..", "config", "ai_config.yaml"),
         help="Path to config file",
     )
+    parser.add_argument("--mock", action="store_true", help="Run in mock mode (no game required)")
+    parser.add_argument("--mock-file", default="", help="Specific fixture file for mock mode")
+    parser.add_argument("--dry-run", action="store_true", help="Dry-run mode: simulate LLM with fixed responses (no API key needed)")
 
     args = parser.parse_args()
 
-    # API key priority: CLI arg > env var
-    api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    # 从 YAML 加载配置（CLI args 覆盖 YAML）
+    backend = args.backend
+    model = args.model
+    api_key = args.api_key
+
+    config_path = args.config
+    if not args.mock and os.path.exists(config_path):
+        try:
+            import yaml
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f)
+            llm_cfg = cfg.get("llm", {})
+            if not backend:
+                backend = llm_cfg.get("backend", "deepseek")
+            if not model:
+                model = llm_cfg.get("model", "")
+            if not api_key:
+                api_key = llm_cfg.get("api_key", "")
+        except Exception:
+            pass
+
+    # 尝试从 api_key.yaml 读取 API key（fallback）
+    if not api_key and not args.mock and not args.dry_run:
+        api_key_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "config", "api_key.yaml"
+        )
+        if os.path.exists(api_key_path):
+            try:
+                import yaml
+                with open(api_key_path) as f:
+                    key_cfg = yaml.safe_load(f)
+                if key_cfg and "llm" in key_cfg:
+                    api_key = key_cfg["llm"].get("api_key", "")
+            except Exception:
+                pass
+
+    # 最后尝试环境变量
+    if not api_key:
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
+    if not backend:
+        backend = "deepseek"
 
     agent = AIAgent(
         mod_host=args.host,
         mod_port=args.port,
         api_key=api_key,
-        model=args.model,
-        config_path=args.config,
+        model=model,
+        config_path=args.config if not args.mock else "",
+        backend=backend,
+        mock=args.mock,
+        mock_file=args.mock_file,
+        dry_run=args.dry_run,
     )
 
     def signal_handler(sig, frame):

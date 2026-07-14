@@ -1,0 +1,93 @@
+{
+  "screen_type": "COMBAT",
+  "in_combat": true,
+  "player": {
+    "current_hp": 52,
+    "max_hp": 75,
+    "block": 0,
+    "energy": 3,
+    "energy_this_turn": 3,
+    "gold": 45,
+    "powers": []
+  },
+  "monsters": [
+    {
+      "id": "JawWorm",
+      "name": "Jaw Worm",
+      "current_hp": 42,
+      "max_hp": 46,
+      "block": 0,
+      "intent": "ATTACK",
+      "intent_damage": 12,
+      "intent_hits": 1,
+      "is_gone": false,
+      "half_dead": false,
+      "powers": []
+    }
+  ],
+  "hand": [
+    {
+      "uuid": "card-001",
+      "id": "Strike_R",
+      "name": "Strike",
+      "cost": 1,
+      "type": "ATTACK",
+      "rarity": "BASIC",
+      "has_target": true,
+      "is_playable": true,
+      "upgrades": 0,
+      "damage": 6,
+      "block": 0,
+      "magic_number": 0,
+      "exhausts": false,
+      "ethereal": false,
+      "description": "Deal 6 damage."
+    },
+    {
+      "uuid": "card-002",
+      "id": "Defend_R",
+      "name": "Defend",
+      "cost": 1,
+      "type": "SKILL",
+      "rarity": "BASIC",
+      "has_target": false,
+      "is_playable": true,
+      "upgrades": 0,
+      "damage": 0,
+      "block": 5,
+      "magic_number": 0,
+      "exhausts": false,
+      "ethereal": false,
+      "description": "Gain 5 block."
+    },
+    {
+      "uuid": "card-003",
+      "id": "Bash",
+      "name": "Bash",
+      "cost": 2,
+      "type": "ATTACK",
+      "rarity": "COMMON",
+      "has_target": true,
+      "is_playable": true,
+      "upgrades": 0,
+      "damage": 8,
+      "block": 0,
+      "magic_number": 2,
+      "exhausts": false,
+      "ethereal": false,
+      "description": "Deal 8 damage. Apply 2 Vulnerable."
+    }
+  ],
+  "draw_pile_count": 7,
+  "discard_pile": [],
+  "exhaust_pile": [],
+  "relics": [
+    {"id": "BurningBlood", "name": "Burning Blood", "counter": -1}
+  ],
+  "potions": [],
+  "turn": 1,
+  "act": 1,
+  "floor": 3,
+  "ascension_level": 0,
+  "class": "IRONCLAD"
+}

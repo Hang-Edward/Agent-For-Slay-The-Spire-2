@@ -12,10 +12,13 @@ class Card:
     card_id: str
     name: str
     cost: int
+    cost_for_turn: int
     card_type: str  # ATTACK, SKILL, POWER, CURSE, STATUS
     rarity: str
+    target_type: str
     has_target: bool
     is_playable: bool
+    playable_reason: str
     upgrades: int
     damage: int
     block: int
@@ -31,10 +34,13 @@ class Card:
             card_id=data.get("id", ""),
             name=data.get("name", ""),
             cost=data.get("cost", 0),
+            cost_for_turn=data.get("cost_for_turn", data.get("cost", 0)),
             card_type=data.get("type", "ATTACK"),
             rarity=data.get("rarity", "COMMON"),
+            target_type=data.get("target_type", ""),
             has_target=data.get("has_target", False),
             is_playable=data.get("is_playable", True),
+            playable_reason=data.get("playable_reason", ""),
             upgrades=data.get("upgrades", 0),
             damage=data.get("damage", 0),
             block=data.get("block", 0),
@@ -58,6 +64,8 @@ class Monster:
     intent_hits: int
     is_gone: bool
     half_dead: bool
+    targetable: bool
+    target_index: int
     powers: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -73,6 +81,8 @@ class Monster:
             intent_hits=data.get("intent_hits", 1),
             is_gone=data.get("is_gone", False),
             half_dead=data.get("half_dead", False),
+            targetable=data.get("targetable", not data.get("is_gone", False)),
+            target_index=data.get("target_index", -1),
             powers=data.get("powers", []),
         )
 
@@ -108,12 +118,20 @@ class GameState:
     floor: int
     ascension_level: int
     char_class: str
+    decision_ready: bool = True
+    action_in_flight: bool = False
+    action_in_progress: bool = False
+    state_revision: int = 0
     gold: int = 0
     raw: dict = field(default_factory=dict)  # original JSON
 
     @property
     def alive_monsters(self) -> list[Monster]:
         return [m for m in self.monsters if m.is_alive]
+
+    @property
+    def targetable_monsters(self) -> list[Monster]:
+        return [m for m in self.alive_monsters if m.targetable]
 
     @property
     def total_monster_hp(self) -> int:
@@ -145,6 +163,10 @@ class GameState:
             floor=data.get("floor", 1),
             ascension_level=data.get("ascension_level", 0),
             char_class=data.get("class", "IRONCLAD"),
+            decision_ready=data.get("decision_ready", True),
+            action_in_flight=data.get("action_in_flight", False),
+            action_in_progress=data.get("action_in_progress", False),
+            state_revision=data.get("state_revision", 0),
             gold=data.get("player", {}).get("gold", 0),
             raw=data,
         )

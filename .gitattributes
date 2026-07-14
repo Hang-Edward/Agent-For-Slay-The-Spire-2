@@ -1,0 +1,35 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Bash scripts must stay LF (even on Windows)
+*.sh text eol=lf
+
+# PowerShell scripts
+*.ps1 text
+
+# Python source
+*.py text diff=python
+
+# Config files
+*.json text
+*.yaml text
+*.yml text
+*.properties text
+
+# Markdown docs
+*.md text
+
+# Git files
+.gitignore text
+.gitattributes text
+
+# Binary files - don't touch
+*.jar binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.class binary
+
+# OS files - don't track
+.DS_Store binary
+Thumbs.db binary

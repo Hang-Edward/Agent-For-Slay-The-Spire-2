@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Sts2AiMod</AssemblyName>
+    <RootNamespace>Sts2AiMod</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2" HintPath="D:\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\sts2.dll" />
+    <Reference Include="0Harmony" HintPath="D:\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\0Harmony.dll" />
+    <Reference Include="GodotSharp" HintPath="D:\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\GodotSharp.dll" />
+  </ItemGroup>
+
+</Project>
