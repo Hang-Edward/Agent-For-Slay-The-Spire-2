@@ -46,10 +46,21 @@ class TeacherReviewService:
         compact = json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if len(compact) > 6000:
             compact = compact[:6000] + "...[truncated]"
+        guardrail_note = ""
+        if summary.get("guardrail_interventions", 0) > 0:
+            guardrail_note = (
+                f"\nNote: The Strategy Guardrail overrode {summary['guardrail_interventions']} unsafe decisions "
+                "during this run. When you see 'guardrail' in the events, the original policy choice was overridden "
+                "by a hard rule (e.g., lethal threat, skipping reward). Treat guardrail-corrected actions as "
+                "ground-truth 'correct' labels for behavior cloning. Focus your feedback on mistakes the policy "
+                "made that the guardrail DID NOT catch, so the policy learns to make correct choices before the "
+                "guardrail needs to intervene."
+            )
         return "\n".join([
             "You are a Slay the Spire 2 teacher supervising a local policy model.",
             "Do not choose the next action. Review the completed run summary and produce concise training advice.",
             "Return short bullet points about mistakes, reward-shaping changes, and reusable rules.",
+            guardrail_note or "",
             "",
             compact,
         ])

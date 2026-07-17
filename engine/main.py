@@ -392,15 +392,29 @@ class AIAgent:
             step.elapsed_ms = result.elapsed_ms
             step.reasoning = reasoning
             self.trace_logger.add_step(step)
+            # 记录护栏干预
+            guardrail_info = {}
+            if result.guardrail and result.guardrail.has_intervention():
+                guardrail_info = {
+                    "interventions": [
+                        {"rule": v.rule, "message": v.message}
+                        for v in result.guardrail.interventions()
+                    ],
+                    "summary": result.guardrail.summary,
+                }
+                print(f"\n[GUARDRAIL] {result.guardrail.summary}")
             self._emit("policy_decision", {
                 "phase": "local_policy_decision",
                 "decision_id": step.decision_id,
                 "policy": policy.name,
                 "command": result.response,
                 "selected_candidate": result.selected_candidate,
+                "guardrail": guardrail_info or None,
             })
-            print(f"\n[{handler.screen_type}] Policy: {result.response} ({result.elapsed_ms}ms)")
-            return self._submit_decision(result.decision, step, "policy", adjusted, result.response)
+            print(f"\n[{handler.screen_type}] Policy: {result.response} ({result.elapsed_ms}ms)"
+                  + (f" [Guardrail: {result.guardrail.summary}]" if result.guardrail and result.guardrail.has_intervention() else ""))
+            return self._submit_decision(result.decision, step, "policy", adjusted, result.response,
+                                         guardrail_info=guardrail_info)
 
         self._emit("llm_started", {"phase": "waiting_for_deepseek", "prompt": prompt})
         try:
@@ -581,15 +595,20 @@ class AIAgent:
     def _teacher_run_summary(self, raw_state: dict, result: str, terminal_reward: float) -> dict:
         events, _gap = self.event_bus.events_after(0)
         recent = []
+        guardrail_count = 0
         for event in events[-40:]:
             data = event.to_dict()
             payload = data.get("payload", {})
+            guardrail = payload.get("guardrail")
+            if guardrail and isinstance(guardrail, dict) and guardrail.get("interventions"):
+                guardrail_count += len(guardrail["interventions"])
             recent.append({
                 "event_type": data.get("event_type"),
                 "phase": payload.get("phase"),
                 "command": payload.get("command"),
                 "explanation": payload.get("explanation"),
                 "reward": payload.get("reward"),
+                "guardrail": guardrail,
             })
         return {
             "result": result,
@@ -597,10 +616,12 @@ class AIAgent:
             "act": raw_state.get("act", 0),
             "terminal_reward": terminal_reward,
             "recent_events": recent,
+            "guardrail_interventions": guardrail_count,
         }
 
     def _submit_decision(self, decision: Decision, step: DecisionStep, source: str,
-                         candidates: list[dict], response: str, error: str = "") -> bool:
+                         candidates: list[dict], response: str, error: str = "",
+                         guardrail_info: dict | None = None) -> bool:
         current_state = getattr(self, "current_state_raw", {}) or {}
         selected = candidates[0] if candidates else None
         if decision.type == "choose_option":
@@ -619,6 +640,7 @@ class AIAgent:
                 "command": decision.to_llm_format(), "explanation": explanation,
                 "candidates": candidates, "elapsed_ms": step.elapsed_ms,
             }},
+            "guardrail": guardrail_info,
         }
         self._emit(event_type, payload)
         self._emit("action_sent", {"decision_id": step.decision_id,

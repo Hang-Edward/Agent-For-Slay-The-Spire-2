@@ -25,6 +25,24 @@ class TrainingDataWriter:
     def _valid(value: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9._-]+", value or ""))
 
+    def log_guardrail_intervention(self, run_id: str, screen_type: str, rule: str,
+                                    message: str, original_action: dict,
+                                    corrected_action: dict | None = None) -> None:
+        """记录护栏干预日志，作为训练时 teacher 标注的附加信号。"""
+        path = self._run_dir(run_id) / "guardrail_interventions.jsonl"
+        line = json.dumps({
+            "schema_version": 1,
+            "run_id": run_id,
+            "screen_type": screen_type,
+            "rule": rule,
+            "message": message,
+            "original_action": original_action,
+            "corrected_action": corrected_action,
+            "source": "guardrail",
+        }, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
     def enqueue(self, event: TelemetryEvent) -> bool:
         try:
             self._queue.put_nowait(event)
@@ -88,6 +106,7 @@ class TrainingDataWriter:
             "explanation": decision_payload.get("explanation", ""),
             "reward": event.payload.get("reward", {}),
             "outcome": "in_progress",
+            "guardrail": decision_payload.get("guardrail"),
         }
         line = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
         path = self._run_dir(event.run_id) / "transitions.jsonl"

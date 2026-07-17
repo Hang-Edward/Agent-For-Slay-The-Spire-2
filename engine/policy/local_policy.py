@@ -1,15 +1,20 @@
-"""本地即时策略。
+"""本地即时策略 + 策略护栏。
 
 这个策略负责低延迟地把已经评分的候选动作转成游戏动作。DeepSeek 可以在
 后续作为老师复盘这些选择，但实时出牌不再依赖 API 调用。
+
+策略护栏 (StrategyGuardrail) 在决策前后两次拦截：
+1. 候选筛选后用护栏检查关键错误（如致命伤害不挡牌）
+2. 最终决策发出前再次检查全局规则（如跳过奖励、选禁用选项）
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 
 from communication.protocol import Decision
+from strategy.guardrails import GuardrailReport, InterventionLevel, StrategyGuardrail
 
 
 @dataclass(frozen=True)
@@ -18,12 +23,16 @@ class PolicyResult:
     response: str
     selected_candidate: dict | None
     elapsed_ms: int
+    guardrail: GuardrailReport | None = None
 
 
 class LocalPolicy:
     """基于本地候选评分选择动作，作为小模型接入前的可替换策略层。"""
 
     name = "LocalPolicy"
+
+    def __init__(self, guardrail: StrategyGuardrail | None = None):
+        self._guardrail = guardrail or StrategyGuardrail()
 
     def decide(self, handler, state_data: dict, candidates: list[dict]) -> PolicyResult:
         start = perf_counter()
@@ -33,12 +42,23 @@ class LocalPolicy:
             decision = handler.fallback_decision(state_data)
         if decision is None:
             decision = Decision.end_turn()
+
+        # 护栏检查：在决策发出前检查领域规则
+        report = self._guardrail.check(
+            screen_type=handler.screen_type,
+            decision=decision,
+            state_data=state_data,
+            candidates=candidates,
+        )
+        final_decision = report.final_decision or decision
+
         elapsed_ms = int((perf_counter() - start) * 1000)
         return PolicyResult(
-            decision=decision,
-            response=decision.to_llm_format(),
+            decision=final_decision,
+            response=final_decision.to_llm_format(),
             selected_candidate=selected,
             elapsed_ms=elapsed_ms,
+            guardrail=report if report.has_intervention() else None,
         )
 
     def _best_candidate(self, candidates: list[dict]) -> dict | None:
