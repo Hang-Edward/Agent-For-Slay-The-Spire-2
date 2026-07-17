@@ -16,7 +16,7 @@ def normalized_candidates(screen_type: str, state_data: dict) -> list[dict]:
             continue
         index = int(option["index"])
         detail = route.get(index, cards.get(index, {}))
-        candidates.append({**detail, "option_index": index, "action_key": f"choice:{index}",
+        candidates.append({**option, **detail, "option_index": index, "action_key": f"choice:{index}",
                            "score": float(detail.get("score", 0))})
     return candidates
 

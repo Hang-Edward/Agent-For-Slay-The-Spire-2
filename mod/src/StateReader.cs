@@ -18,9 +18,9 @@ public static class StateReader
     /// <summary>读取完整游戏状态。</summary>
     public static GameStateJson? ReadFullState(CombatManager? combatManager)
     {
+        var result = new GameStateJson();
         try
         {
-            var result = new GameStateJson();
             var runState = RunManager.Instance.DebugOnlyGetState();
             var player = runState == null ? null : LocalContext.GetMe(runState);
 
@@ -106,7 +106,17 @@ public static class StateReader
         catch (Exception ex)
         {
             ModLogger.Log($"StateReader error: {ex.Message}");
-            return null;
+            try
+            {
+                // 存档加载和部分 UI 转场期间，RunState/Model 可能尚未初始化；
+                // 这时仍尽量暴露可点击 UI，避免 Agent 只能看到默认 IDLE。
+                UiStateReader.Apply(result);
+            }
+            catch (Exception uiEx)
+            {
+                ModLogger.Log($"UiStateReader fallback failed: {uiEx.Message}");
+            }
+            return result;
         }
     }
 

@@ -47,10 +47,46 @@ class LocalPolicy:
         return max(
             candidates,
             key=lambda item: (
+                self._automation_priority(item),
                 float(item.get("final_score", item.get("score", 0.0))),
                 -int(item.get("option_index", 9999)),
             ),
         )
+
+    def _automation_priority(self, candidate: dict) -> float:
+        if candidate.get("executed_previously"):
+            return -500.0
+        if candidate.get("stalled_previously"):
+            return -400.0
+        text = " ".join(
+            str(candidate.get(key, ""))
+            for key in ("kind", "id", "name", "description", "action_key")
+        ).lower()
+        if any(token in text for token in (
+            "quit", "exit", "settings", "option", "compendium", "credits",
+            "multiplayer", "多人", "reset", "重置", "display", "monitor",
+            "dropdown", "invite", "邀请",
+        )):
+            return -100.0
+        if "continue_run" in text:
+            return 55.0
+        if any(token in text for token in ("confirm", "confirmbutton", "确认", "start", "begin", "embark", "ready")):
+            return 50.0
+        if any(token in text for token in ("standard", "标准", "new run")):
+            return 40.0
+        if any(token in text for token in ("singleplayer", "single player", "单人模式")):
+            return 35.0
+        if "charselectbutton" in text:
+            return 34.5
+        if any(token in text for token in ("ironclad", "铁甲")):
+            return 34.0
+        if any(token in text for token in ("ironclad", "character", "select")):
+            return 30.0
+        if "continue" in text or "resume" in text:
+            return 25.0
+        if "proceed" in text:
+            return 10.0
+        return 0.0
 
     def _decision_from_candidate(self, screen_type: str, state_data: dict,
                                  candidate: dict | None) -> Decision | None:

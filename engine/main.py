@@ -37,6 +37,7 @@ from history.rewards import RewardCalculator
 from history.run_store import RunHistoryStore
 from learning.experience_service import ExperienceService
 from learning.experience_store import ExperienceStore
+from learning.training_data_writer import TrainingDataWriter
 from policy.local_policy import LocalPolicy
 from teacher.deepseek_teacher import TeacherReviewService
 from telemetry.event_bus import DecisionEventBus
@@ -119,7 +120,9 @@ class AIAgent:
         self.data_dir = os.path.join(project_dir, "data")
         self.event_bus = DecisionEventBus(secret_values=(api_key,))
         self.history_store = RunHistoryStore(self.data_dir)
+        self.training_data_writer = TrainingDataWriter(self.data_dir)
         self.event_bus.add_sink(self.history_store)
+        self.event_bus.add_sink(self.training_data_writer)
         self.reward_calculator = RewardCalculator()
         self.experience_store = ExperienceStore(os.path.join(self.data_dir, "experience.sqlite3"))
         self.experience_service = ExperienceService(self.experience_store)
@@ -128,6 +131,10 @@ class AIAgent:
         self.current_run_id = ""
         self.current_battle_id = ""
         self.run_completed = False
+        self.pause_after_run_completed = False
+        self.completion_pause_reported = False
+        self.restart_flow_completed_run_id = ""
+        self.restart_flow_executed_keys: set[str] = set()
         self.pending_transition: dict | None = None
         self.policy_version = "experience-v1"
 
@@ -140,6 +147,10 @@ class AIAgent:
         self.last_decision: Decision | None = None
         self.stalled_options: dict[str, set[int]] = {}
         self.decision_failure_count: int = 0
+        self.active_screen_id: str = ""
+        self.non_actionable_signature: str = ""
+        self.non_actionable_since: float = 0.0
+        self.reported_stuck_signatures: set[str] = set()
         self.mock_file_list: list[str] = []  # mock 多文件模式
 
     # ─── 公共接口 ───────────────────────────────────────────
@@ -179,7 +190,8 @@ class AIAgent:
             pass
         finally:
             for closer in (self.dashboard.stop, self.history_store.close,
-                           self.experience_store.close, self.tui.stop):
+                           self.training_data_writer.close, self.experience_store.close,
+                           self.tui.stop):
                 try:
                     closer()
                 except Exception as error:
@@ -221,11 +233,17 @@ class AIAgent:
         })
         self._complete_run_if_needed(raw_state)
         self.tui.update_state(state)
+        if self._should_pause_after_completed_run(raw_state):
+            self.tui.update_reasoning("Run completed; automation paused before starting another run")
+            self.tui.refresh()
+            time.sleep(0.3)
+            return
 
         handler = self.registry.get_handler_for_state(self.current_state_raw)
         if handler is not None:
             state_data = handler.extract_state(self.current_state_raw)
             screen_id = self._compute_screen_id(handler.screen_type, state_data)
+            self.active_screen_id = screen_id
             now = time.monotonic()
             waiting_for_team = False
             if handler.screen_type == "COMBAT":
@@ -254,6 +272,9 @@ class AIAgent:
             avoided = self.stalled_options.get(screen_id, set())
             if avoided:
                 state_data["stalled_option_indices"] = sorted(avoided)
+            executed = self._executed_restart_option_indices(state_data)
+            if executed:
+                state_data["executed_option_indices"] = sorted(executed)
 
             if (
                 screen_id != self.last_screen_id
@@ -270,6 +291,9 @@ class AIAgent:
                     self.decision_failure_count += 1
                     retry_delay = min(30.0, 2.0 ** min(self.decision_failure_count, 5))
                     self.next_decision_time = time.monotonic() + retry_delay
+            self._observe_non_actionable_state(raw_state, handler, state_data)
+        else:
+            self._observe_non_actionable_state(raw_state, None, None)
 
         screen = self.current_state_raw.get("screen_type", "?")
         in_combat = self.current_state_raw.get("in_combat", False)
@@ -304,6 +328,22 @@ class AIAgent:
                     "confidence": 0.0,
                 }
                 for candidate in candidates
+            ]
+        stalled = set(state_data.get("stalled_option_indices", []))
+        executed = set(state_data.get("executed_option_indices", []))
+        if stalled or executed:
+            adjusted = [
+                {
+                    **candidate,
+                    "stalled_previously": int(candidate.get("option_index", -1)) in stalled,
+                    "executed_previously": int(candidate.get("option_index", -1)) in executed,
+                    "final_score": (
+                        float(candidate.get("final_score", candidate.get("score", 0.0))) - 1000.0
+                        if int(candidate.get("option_index", -1)) in stalled | executed
+                        else candidate.get("final_score", candidate.get("score", 0.0))
+                    ),
+                }
+                for candidate in adjusted
             ]
         evidence = format_experience_evidence(adjusted)
         combined = "\n".join(part for part in (strategy_instructions, evidence) if part)
@@ -436,6 +476,7 @@ class AIAgent:
         self.current_run_id = uuid4().hex
         self.current_battle_id = uuid4().hex if raw_state.get("in_combat") else ""
         self.run_completed = False
+        self.completion_pause_reported = False
         self._emit("run_started", {
             "character": raw_state.get("class", ""), "act": raw_state.get("act", 0),
             "floor": raw_state.get("floor", 0), "phase": "run_started",
@@ -472,6 +513,53 @@ class AIAgent:
                                      "terminal_reward": terminal.total, "phase": "run_completed"})
         self._request_teacher_review(raw_state, result, terminal.total)
         self.run_completed = True
+        self.restart_flow_completed_run_id = self.current_run_id
+        self.restart_flow_executed_keys = set()
+
+    def _should_pause_after_completed_run(self, raw_state: dict) -> bool:
+        """一局结束后停止自动动作，避免结算页和主菜单状态机被连续点击打坏。"""
+        if not getattr(self, "pause_after_run_completed", True):
+            return False
+        if not getattr(self, "run_completed", False):
+            return False
+        screen = raw_state.get("screen_type", "")
+        if raw_state.get("in_combat", False) or screen == "COMBAT":
+            return False
+        if not getattr(self, "completion_pause_reported", False):
+            self._emit("automation_paused_after_run", {
+                "phase": "automation_paused",
+                "screen_type": screen,
+                "message": "Run completed; not starting another run automatically.",
+            })
+            self.completion_pause_reported = True
+        return True
+
+    def _choice_semantic_key(self, candidate: dict | None) -> str:
+        if not candidate:
+            return ""
+        return "|".join(
+            str(candidate.get(key, ""))
+            for key in ("kind", "id", "name")
+        ).lower()
+
+    def _in_restart_flow(self, raw_state: dict | None = None) -> bool:
+        raw_state = raw_state or getattr(self, "current_state_raw", {}) or {}
+        return bool(
+            getattr(self, "run_completed", False)
+            and getattr(self, "restart_flow_completed_run_id", "")
+            and raw_state.get("screen_type") == "MAIN_MENU"
+            and not raw_state.get("in_combat", False)
+        )
+
+    def _executed_restart_option_indices(self, state_data: dict) -> set[int]:
+        if not self._in_restart_flow():
+            return set()
+        executed = getattr(self, "restart_flow_executed_keys", set())
+        result = set()
+        for option in state_data.get("options", []):
+            if self._choice_semantic_key(option) in executed and "index" in option:
+                result.add(int(option["index"]))
+        return result
 
     def _request_teacher_review(self, raw_state: dict, result: str, terminal_reward: float) -> None:
         if not getattr(self, "teacher_review_on_run_end", False):
@@ -536,10 +624,16 @@ class AIAgent:
         self._emit("action_sent", {"decision_id": step.decision_id,
                                    "action": decision.to_json(), "phase": "submitting_action"})
         if not self.client.post_decision(decision):
+            if decision.type == "choose_option" and getattr(self, "active_screen_id", ""):
+                self.stalled_options.setdefault(self.active_screen_id, set()).add(decision.option_index)
             self._emit("action_rejected", {"decision_id": step.decision_id,
                                            "action": decision.to_json(), "phase": "action_rejected"})
             self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
             return False
+        if decision.type == "choose_option" and self._in_restart_flow(current_state):
+            key = self._choice_semantic_key(selected)
+            if key:
+                self.restart_flow_executed_keys.add(key)
         self._emit("action_accepted", {"decision_id": step.decision_id,
                                        "action": decision.to_json(), "phase": "waiting_for_game"})
         self.pending_transition = {
@@ -550,6 +644,63 @@ class AIAgent:
         }
         self.last_decision = decision
         return True
+
+    def _observe_non_actionable_state(self, raw_state: dict, handler, state_data: dict | None) -> None:
+        """发现无动作候选的稳定卡点时上报，并低频请求老师诊断。"""
+        actionable = False
+        if handler is not None and state_data is not None:
+            try:
+                actionable = handler.should_act(state_data)
+            except Exception:
+                actionable = False
+        if actionable or raw_state.get("action_in_flight") or raw_state.get("action_in_progress"):
+            self.non_actionable_signature = ""
+            self.non_actionable_since = 0.0
+            return
+
+        screen = raw_state.get("screen_type", "")
+        if screen in {"COMBAT"}:
+            return
+        signature = "|".join(map(str, [
+            screen,
+            raw_state.get("room_type", ""),
+            raw_state.get("act", 0),
+            raw_state.get("floor", 0),
+            len(raw_state.get("options", []) or []),
+        ]))
+        now = time.monotonic()
+        if signature != self.non_actionable_signature:
+            self.non_actionable_signature = signature
+            self.non_actionable_since = now
+            return
+
+        if now - self.non_actionable_since < 8.0 or signature in self.reported_stuck_signatures:
+            return
+
+        self.reported_stuck_signatures.add(signature)
+        summary = {
+            "screen_type": screen,
+            "room_type": raw_state.get("room_type", ""),
+            "act": raw_state.get("act", 0),
+            "floor": raw_state.get("floor", 0),
+            "decision_ready": raw_state.get("decision_ready", False),
+            "action_in_flight": raw_state.get("action_in_flight", False),
+            "options_count": len(raw_state.get("options", []) or []),
+            "last_decision": self.last_decision.to_json() if self.last_decision else None,
+        }
+        self._emit("stuck_detected", {
+            "phase": "stuck_detected",
+            "summary": summary,
+            "message": "No actionable options were exposed for this stable state.",
+        })
+        self.tui.update_reasoning(f"Stuck detected on {screen}; asking teacher for diagnosis")
+        teacher = getattr(self, "teacher", None)
+        review = teacher.review_stuck_state(summary) if teacher is not None else {"status": "missing"}
+        self._emit("teacher_stuck_review_finished", {
+            "phase": "teacher_stuck_reviewed",
+            **review,
+            "summary": summary,
+        })
 
     def _compute_screen_id(self, screen_type: str, state_data: dict) -> str:
         """为当前屏幕生成唯一 ID，用于判断是否需要新决策。"""

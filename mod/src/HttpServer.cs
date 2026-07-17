@@ -18,14 +18,13 @@ public class AiHttpServer : IDisposable
     {
         Port = port;
         _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
-        _listener.Prefixes.Add($"http://localhost:{Port}/");
     }
 
     public void Start()
     {
         if (_running) return;
-        _running = true;
         _listener.Start();
+        _running = true;
         _listenTask = Task.Run(() => ListenLoop(_cts.Token));
         ModLogger.Log($"HTTP server started on port {Port}");
     }

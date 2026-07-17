@@ -32,6 +32,9 @@ logs/
 # Runtime data and local work state
 data/
 .superpowers/
+.local/
+handoff/
+.pytest_cache/
 
 # Test build artifacts
 mod/tests/bin/
