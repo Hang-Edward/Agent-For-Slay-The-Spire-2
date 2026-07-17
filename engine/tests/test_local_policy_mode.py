@@ -87,20 +87,78 @@ def test_agent_does_not_pause_after_completed_run_by_default():
     assert agent.event_bus.events == []
 
 
-def test_agent_marks_completed_run_restart_options_as_executed():
+def test_handle_restart_flow_singleplayer_first():
     agent = object.__new__(AIAgent)
     agent.run_completed = True
     agent.restart_flow_completed_run_id = "run-1"
-    agent.restart_flow_executed_keys = {"confirm|confirmbutton|confirmbutton"}
+    agent.restart_flow_phase = ""
     agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
-    state_data = {
-        "options": [
-            {"index": 0, "kind": "confirm", "id": "ConfirmButton", "name": "ConfirmButton"},
-            {"index": 1, "kind": "singleplayer", "id": "StandardButton", "name": "标准模式"},
-        ],
-    }
 
-    assert agent._executed_restart_option_indices(state_data) == {0}
+    decision = agent._handle_restart_flow({
+        "options": [
+            {"index": 0, "kind": "singleplayer", "name": "单人模式", "enabled": True},
+            {"index": 1, "kind": "character", "name": "IRONCLAD_button", "enabled": True},
+        ],
+    })
+
+    assert decision is not None
+    assert decision.option_index == 0
+    assert agent.restart_flow_phase == "singleplayer_selected"
+
+
+def test_handle_restart_flow_ironclad_after_singleplayer():
+    agent = object.__new__(AIAgent)
+    agent.run_completed = True
+    agent.restart_flow_completed_run_id = "run-1"
+    agent.restart_flow_phase = "singleplayer_selected"
+    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
+
+    decision = agent._handle_restart_flow({
+        "options": [
+            {"index": 0, "kind": "character", "id": "SILENT_button", "name": "SILENT_button", "enabled": True},
+            {"index": 1, "kind": "character", "id": "IRONCLAD_button", "name": "IRONCLAD_button", "enabled": True},
+            {"index": 2, "kind": "confirm", "id": "ConfirmButton", "name": "ConfirmButton", "enabled": True},
+        ],
+    })
+
+    assert decision is not None
+    assert decision.option_index == 1
+    assert agent.restart_flow_phase == "character_selected"
+
+
+def test_handle_restart_flow_confirm_after_character():
+    agent = object.__new__(AIAgent)
+    agent.run_completed = True
+    agent.restart_flow_completed_run_id = "run-1"
+    agent.restart_flow_phase = "character_selected"
+    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
+
+    decision = agent._handle_restart_flow({
+        "options": [
+            {"index": 0, "kind": "character", "id": "IRONCLAD_button", "name": "IRONCLAD_button", "enabled": True},
+            {"index": 1, "kind": "confirm", "id": "ConfirmButton", "name": "ConfirmButton", "enabled": True},
+        ],
+    })
+
+    assert decision is not None
+    assert decision.option_index == 1
+    assert agent.restart_flow_phase == "confirming"
+
+
+def test_handle_restart_flow_clears_flags_after_confirm():
+    agent = object.__new__(AIAgent)
+    agent.run_completed = True
+    agent.restart_flow_completed_run_id = "run-1"
+    agent.restart_flow_phase = "confirming"
+    agent.completion_pause_reported = True
+    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
+
+    decision = agent._handle_restart_flow({"options": []})
+
+    assert decision is None
+    assert agent.run_completed is False
+    assert agent.completion_pause_reported is False
+    assert agent.restart_flow_completed_run_id == ""
 
 
 def test_local_policy_avoids_previously_executed_restart_action():

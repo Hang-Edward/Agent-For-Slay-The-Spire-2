@@ -131,10 +131,10 @@ class AIAgent:
         self.current_run_id = ""
         self.current_battle_id = ""
         self.run_completed = False
-        self.pause_after_run_completed = False
+        self.pause_after_run_completed = True
         self.completion_pause_reported = False
         self.restart_flow_completed_run_id = ""
-        self.restart_flow_executed_keys: set[str] = set()
+        self.restart_flow_phase = ""  # "" | "singleplayer_selected" | "character_selected" | "confirming"
         self.pending_transition: dict | None = None
         self.policy_version = "experience-v1"
 
@@ -272,9 +272,18 @@ class AIAgent:
             avoided = self.stalled_options.get(screen_id, set())
             if avoided:
                 state_data["stalled_option_indices"] = sorted(avoided)
-            executed = self._executed_restart_option_indices(state_data)
-            if executed:
-                state_data["executed_option_indices"] = sorted(executed)
+
+            # 重新开始流程：在局结束后逐阶段导航回新一局
+            restart_decision = self._handle_restart_flow(state_data)
+            if restart_decision is not None:
+                self.last_screen_id = ""
+                self.last_action_time = 0.0
+                self.next_decision_time = time.monotonic() + 0.5
+                self.client.post_decision(restart_decision)
+                self.tui.update_reasoning(f"[restart] {restart_decision.to_llm_format()}")
+                print(f"\n[RESTART] {restart_decision.to_llm_format()}")
+                time.sleep(0.5)
+                return
 
             if (
                 screen_id != self.last_screen_id
@@ -528,10 +537,10 @@ class AIAgent:
         self._request_teacher_review(raw_state, result, terminal.total)
         self.run_completed = True
         self.restart_flow_completed_run_id = self.current_run_id
-        self.restart_flow_executed_keys = set()
+        self.restart_flow_phase = ""
 
     def _should_pause_after_completed_run(self, raw_state: dict) -> bool:
-        """一局结束后停止自动动作，避免结算页和主菜单状态机被连续点击打坏。"""
+        """一局结束后暂停自动动作，等回到主菜单再执行重新开始序列。"""
         if not getattr(self, "pause_after_run_completed", True):
             return False
         if not getattr(self, "run_completed", False):
@@ -539,13 +548,10 @@ class AIAgent:
         screen = raw_state.get("screen_type", "")
         if raw_state.get("in_combat", False) or screen == "COMBAT":
             return False
-        if not getattr(self, "completion_pause_reported", False):
-            self._emit("automation_paused_after_run", {
-                "phase": "automation_paused",
-                "screen_type": screen,
-                "message": "Run completed; not starting another run automatically.",
-            })
-            self.completion_pause_reported = True
+        # 如果在主菜单且有完成态，进入重新开始流程
+        if screen == "MAIN_MENU":
+            return False  # 不暂停，走 restart_flow
+        # 非主菜单的结算界面 → 暂停等待
         return True
 
     def _choice_semantic_key(self, candidate: dict | None) -> str:
@@ -556,24 +562,66 @@ class AIAgent:
             for key in ("kind", "id", "name")
         ).lower()
 
-    def _in_restart_flow(self, raw_state: dict | None = None) -> bool:
-        raw_state = raw_state or getattr(self, "current_state_raw", {}) or {}
-        return bool(
-            getattr(self, "run_completed", False)
-            and getattr(self, "restart_flow_completed_run_id", "")
-            and raw_state.get("screen_type") == "MAIN_MENU"
-            and not raw_state.get("in_combat", False)
-        )
-
-    def _executed_restart_option_indices(self, state_data: dict) -> set[int]:
-        if not self._in_restart_flow():
-            return set()
-        executed = getattr(self, "restart_flow_executed_keys", set())
-        result = set()
+    def _find_option(self, state_data: dict, *keywords: str) -> int | None:
+        """在选项中找匹配关键词的第一个可用选项。"""
         for option in state_data.get("options", []):
-            if self._choice_semantic_key(option) in executed and "index" in option:
-                result.add(int(option["index"]))
-        return result
+            if not option.get("enabled", True):
+                continue
+            text = self._choice_semantic_key(option)
+            for kw in keywords:
+                if kw.lower() in text:
+                    return int(option["index"])
+        return None
+
+    def _handle_restart_flow(self, state_data: dict) -> Decision | None:
+        """逐阶段执行"开始新一局"导航序列。"""
+        if not getattr(self, "run_completed", False):
+            return None
+        raw = getattr(self, "current_state_raw", {}) or {}
+        screen = raw.get("screen_type", "")
+        if screen != "MAIN_MENU":
+            return None
+
+        phase = getattr(self, "restart_flow_phase", "")
+
+        # 阶段 0: 点单人模式
+        if not phase:
+            idx = self._find_option(state_data, "singleplayer", "单人模式")
+            if idx is not None:
+                self.restart_flow_phase = "singleplayer_selected"
+                return Decision.choose_option(idx)
+            return None
+
+        # 阶段 1: 选铁甲战士 或 确认
+        if phase == "singleplayer_selected":
+            idx = self._find_option(state_data, "ironclad", "铁甲")
+            if idx is not None:
+                self.restart_flow_phase = "character_selected"
+                return Decision.choose_option(idx)
+            # 可能在单人模式后已经显示了确认按钮
+            idx = self._find_option(state_data, "confirm", "标准模式", "standard", "embark")
+            if idx is not None:
+                self.restart_flow_phase = "confirming"
+                return Decision.choose_option(idx)
+            return None
+
+        # 阶段 2: 确认开始
+        if phase in ("character_selected",):
+            idx = self._find_option(state_data, "confirm", "confirmbutton", "标准模式", "standard", "embark", "开始")
+            if idx is not None:
+                self.restart_flow_phase = "confirming"
+                return Decision.choose_option(idx)
+            return None
+
+        # 阶段 3: 开始后清除完成标志
+        if phase == "confirming":
+            self.run_completed = False
+            self.completion_pause_reported = False
+            self.restart_flow_completed_run_id = ""
+            self.restart_flow_phase = ""
+            return None
+
+        return None
 
     def _request_teacher_review(self, raw_state: dict, result: str, terminal_reward: float) -> None:
         if not getattr(self, "teacher_review_on_run_end", False):
@@ -652,10 +700,6 @@ class AIAgent:
                                            "action": decision.to_json(), "phase": "action_rejected"})
             self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
             return False
-        if decision.type == "choose_option" and self._in_restart_flow(current_state):
-            key = self._choice_semantic_key(selected)
-            if key:
-                self.restart_flow_executed_keys.add(key)
         self._emit("action_accepted", {"decision_id": step.decision_id,
                                        "action": decision.to_json(), "phase": "waiting_for_game"})
         self.pending_transition = {

@@ -86,6 +86,14 @@ class TrainingDataWriter:
                 "timestamp_utc": event.timestamp_utc,
                 **payload,
             })
+            return
+        if event.event_type == "teacher_stuck_review_finished":
+            self._write_json(event.run_id, "teacher_stuck_review.json", {
+                "schema_version": 1,
+                "run_id": event.run_id,
+                "timestamp_utc": event.timestamp_utc,
+                **payload,
+            })
 
     def _write_transition(self, event: TelemetryEvent) -> None:
         decision_id = event.payload.get("decision_id", "")
