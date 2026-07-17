@@ -37,6 +37,8 @@ from history.rewards import RewardCalculator
 from history.run_store import RunHistoryStore
 from learning.experience_service import ExperienceService
 from learning.experience_store import ExperienceStore
+from policy.local_policy import LocalPolicy
+from teacher.deepseek_teacher import TeacherReviewService
 from telemetry.event_bus import DecisionEventBus
 
 
@@ -51,6 +53,7 @@ class AIAgent:
         model: str = "",
         config_path: str = "",
         backend: str = "deepseek",
+        decision_mode: str = "llm",
         mock: bool = False,
         mock_file: str = "",
         dry_run: bool = False,
@@ -77,6 +80,10 @@ class AIAgent:
         except ValueError as e:
             print(f"ERROR: {e}")
             sys.exit(1)
+        self.decision_mode = decision_mode
+        self.policy = LocalPolicy()
+        self.teacher_enabled = False
+        self.teacher_review_on_run_end = True
 
         # ── 决策处理器 ──────────────────────────────────────
         self.registry: DecisionRegistry = get_default_registry()
@@ -98,6 +105,9 @@ class AIAgent:
                     enabled=multiplayer.get("wait_for_teammates", True),
                     timeout_seconds=float(multiplayer.get("wait_timeout_seconds", 20)),
                 )
+                teacher_config = config_data.get("teacher", {})
+                self.teacher_enabled = bool(teacher_config.get("enabled", False))
+                self.teacher_review_on_run_end = bool(teacher_config.get("review_on_run_end", True))
             except Exception as e:
                 print(f"Warning: Failed to load config: {e}")
 
@@ -113,6 +123,7 @@ class AIAgent:
         self.reward_calculator = RewardCalculator()
         self.experience_store = ExperienceStore(os.path.join(self.data_dir, "experience.sqlite3"))
         self.experience_service = ExperienceService(self.experience_store)
+        self.teacher = TeacherReviewService(self.llm, enabled=self.teacher_enabled)
         self.dashboard = DashboardServer(self.event_bus, self.history_store)
         self.current_run_id = ""
         self.current_battle_id = ""
@@ -329,6 +340,28 @@ class AIAgent:
             print(f"\n[{handler.screen_type}] Auto: {auto_decision}")
             return self._submit_decision(auto_decision, step, "auto", adjusted, response)
 
+        if getattr(self, "decision_mode", "llm") == "local_policy":
+            policy = getattr(self, "policy", LocalPolicy())
+            result = policy.decide(handler, state_data, adjusted)
+            reasoning = f"[policy] {result.response}"
+            self.tui.update_reasoning(reasoning)
+            self.tui.add_decision(result.response, result.decision, result.elapsed_ms)
+            self.tui.refresh()
+            step.llm_response = result.response
+            step.decision = result.decision
+            step.elapsed_ms = result.elapsed_ms
+            step.reasoning = reasoning
+            self.trace_logger.add_step(step)
+            self._emit("policy_decision", {
+                "phase": "local_policy_decision",
+                "decision_id": step.decision_id,
+                "policy": policy.name,
+                "command": result.response,
+                "selected_candidate": result.selected_candidate,
+            })
+            print(f"\n[{handler.screen_type}] Policy: {result.response} ({result.elapsed_ms}ms)")
+            return self._submit_decision(result.decision, step, "policy", adjusted, result.response)
+
         self._emit("llm_started", {"phase": "waiting_for_deepseek", "prompt": prompt})
         try:
             response, elapsed = self.llm.think(prompt)
@@ -437,7 +470,46 @@ class AIAgent:
         self.experience_store.finalize_run(self.current_run_id, result, terminal.total)
         self._emit("run_completed", {"result": result, "floor": raw_state.get("floor", 0),
                                      "terminal_reward": terminal.total, "phase": "run_completed"})
+        self._request_teacher_review(raw_state, result, terminal.total)
         self.run_completed = True
+
+    def _request_teacher_review(self, raw_state: dict, result: str, terminal_reward: float) -> None:
+        if not getattr(self, "teacher_review_on_run_end", False):
+            return
+        teacher = getattr(self, "teacher", None)
+        if teacher is None:
+            return
+        summary = self._teacher_run_summary(raw_state, result, terminal_reward)
+        self._emit("teacher_review_started", {
+            "phase": "teacher_reviewing",
+            "summary": summary,
+        })
+        review = teacher.review_run(summary)
+        self._emit("teacher_review_finished", {
+            "phase": "teacher_reviewed",
+            **review,
+        })
+
+    def _teacher_run_summary(self, raw_state: dict, result: str, terminal_reward: float) -> dict:
+        events, _gap = self.event_bus.events_after(0)
+        recent = []
+        for event in events[-40:]:
+            data = event.to_dict()
+            payload = data.get("payload", {})
+            recent.append({
+                "event_type": data.get("event_type"),
+                "phase": payload.get("phase"),
+                "command": payload.get("command"),
+                "explanation": payload.get("explanation"),
+                "reward": payload.get("reward"),
+            })
+        return {
+            "result": result,
+            "floor": raw_state.get("floor", 0),
+            "act": raw_state.get("act", 0),
+            "terminal_reward": terminal_reward,
+            "recent_events": recent,
+        }
 
     def _submit_decision(self, decision: Decision, step: DecisionStep, source: str,
                          candidates: list[dict], response: str, error: str = "") -> bool:
@@ -510,6 +582,12 @@ def main():
     parser.add_argument("--model", default="", help="Model name override")
     parser.add_argument("--backend", default="", help="LLM backend: deepseek, ollama, claude")
     parser.add_argument(
+        "--decision-mode",
+        choices=("local_policy", "llm"),
+        default="",
+        help="Realtime decision mode: local_policy avoids LLM calls; llm uses the configured backend",
+    )
+    parser.add_argument(
         "--config",
         default=os.path.join(os.path.dirname(__file__), "..", "config", "ai_config.yaml"),
         help="Path to config file",
@@ -524,6 +602,7 @@ def main():
     backend = args.backend
     model = args.model
     api_key = args.api_key
+    decision_mode = args.decision_mode
 
     config_path = args.config
     if not args.mock and os.path.exists(config_path):
@@ -538,6 +617,8 @@ def main():
                 model = llm_cfg.get("model", "")
             if not api_key:
                 api_key = llm_cfg.get("api_key", "")
+            if not decision_mode:
+                decision_mode = cfg.get("agent", {}).get("decision_mode", "")
         except Exception:
             pass
 
@@ -563,6 +644,8 @@ def main():
 
     if not backend:
         backend = "deepseek"
+    if not decision_mode:
+        decision_mode = "local_policy"
 
     agent = AIAgent(
         mod_host=args.host,
@@ -571,6 +654,7 @@ def main():
         model=model,
         config_path=args.config if not args.mock else "",
         backend=backend,
+        decision_mode=decision_mode,
         mock=args.mock,
         mock_file=args.mock_file,
         dry_run=args.dry_run,

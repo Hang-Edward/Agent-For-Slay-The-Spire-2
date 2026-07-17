@@ -1,4 +1,9 @@
 # Slay the Spire AI Agent — Configuration
+agent:
+  # local_policy: 本地策略实时决策，DeepSeek 只作为老师/复盘接口保留。
+  # llm: 兼容旧模式，每一步实时调用配置的 LLM 决策。
+  decision_mode: "local_policy"
+
 # Mod settings
 mod:
   host: "127.0.0.1"
@@ -13,6 +18,12 @@ llm:
   max_tokens: 128
   # Ollama: set ollama_url if using local LLM
   # ollama_url: "http://localhost:11434"
+
+teacher:
+  # DeepSeek 老师只在低频节点复盘，不参与实时动作选择。
+  enabled: true
+  review_on_run_end: true
+  low_confidence_review: false
 
 # Strategy configuration
 strategy:
