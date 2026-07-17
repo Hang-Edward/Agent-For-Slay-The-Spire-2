@@ -22,11 +22,17 @@ public static class DecisionExecutor
 
     public static bool Execute(CombatManager? combatManager, AiDecision decision)
     {
-        // 没有进入战斗时不能执行出牌或结束回合，直接返回失败。
-        if (combatManager == null) return false;
-
         try
         {
+            if (decision.Type == "choose_option")
+            {
+                var ok = UiActionRegistry.Execute(decision.OptionIndex);
+                if (ok) ModLogger.Log($"Selected UI option [{decision.OptionIndex}]");
+                return ok;
+            }
+
+            // 战斗动作仍要求有效的 CombatManager。
+            if (combatManager == null) return false;
             return decision.Type switch
             {
                 "play_card" => PlayCard(combatManager, decision),

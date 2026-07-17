@@ -8,7 +8,7 @@ mod:
 llm:
   # Backend: deepseek, ollama, claude
   backend: "deepseek"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   temperature: 0.3
   max_tokens: 128
   # Ollama: set ollama_url if using local LLM
@@ -19,17 +19,26 @@ strategy:
   # Current preset: balanced, aggressive, defensive, setup, or "custom"
   preset: "balanced"
 
+  multiplayer:
+    # 等待队友先行动，再根据其实际出牌重新规划；超时后主动行动以避免互相等待。
+    wait_for_teammates: true
+    wait_timeout_seconds: 20
+
   # Individual skill toggles (overrides preset)
   skills:
-    focus_fire: false
+    focus_fire: true
     block_when_attacked: false
     save_potions: false
-    no_overkill: false
+    no_overkill: true
     setup_first: false
     aoe_priority: false
     conserve_energy: false
     aggressive: false
     elite_path: false
+    adaptive_hp_trade: true
+    deck_coherence: true
+    adaptive_pathing: true
+    team_coordination: true
 
 # Custom user-defined skills
 # Each skill is a concrete instruction injected into the LLM prompt

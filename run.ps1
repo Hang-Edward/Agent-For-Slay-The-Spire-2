@@ -1,8 +1,9 @@
-# Slay the Spire AI Agent — Windows 启动脚本
+﻿# Slay the Spire AI Agent — Windows 启动脚本
 #
 # 用法:
 #   .\run.ps1                          # 使用 DEEPSEEK_API_KEY 环境变量运行
 #   .\run.ps1 -ApiKey "sk-..."         # 指定 API Key
+#   .\run.ps1 -DryRun                  # 不使用 API Key，验证完整自动化链路
 #   .\run.ps1 -Help                    # 查看所有选项
 
 param(
@@ -12,6 +13,7 @@ param(
     [string]$HostName = "",
     [int]$Port = 0,
     [string]$Backend = "",
+    [switch]$DryRun = $false,
     [switch]$Mock = $false,
     [string]$MockFile = ""
 )
@@ -27,8 +29,11 @@ Set-Location $EngineDir
 $ApiKeyFile = Join-Path $ConfigDir "api_key.yaml"
 if (Test-Path $ApiKeyFile) {
     $yaml = Get-Content $ApiKeyFile -Raw
-    if ($yaml -match 'api_key\s*:\s*"([^"]+)"') {
-        $key = $Matches[1]
+    # 兼容 YAML 中的双引号、单引号和无引号写法。
+    if ($yaml -match 'api_key\s*:\s*(?:"([^"]+)"|''([^'']+)''|([^\s#]+))') {
+        $key = @($Matches[1], $Matches[2], $Matches[3]) |
+            Where-Object { $_ } |
+            Select-Object -First 1
         if ($key -and $key -ne "sk-your-deepseek-api-key-here") {
             $env:DEEPSEEK_API_KEY = $key
         }
@@ -41,18 +46,13 @@ if ($ApiKey) {
 }
 
 # 检查 API Key 是否可用
-if (-not $env:DEEPSEEK_API_KEY -and -not $Help) {
+if (-not $env:DEEPSEEK_API_KEY -and -not $Help -and -not $DryRun) {
     Write-Host "错误: 未配置 DeepSeek API Key。" -ForegroundColor Red
     Write-Host "设置 DEEPSEEK_API_KEY 环境变量，或使用 -ApiKey 参数指定" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "示例:" -ForegroundColor Cyan
     Write-Host "  .\run.ps1 -ApiKey ""sk-你的key""" -ForegroundColor Cyan
     exit 1
-}
-
-if ($Help) {
-    & python main.py --help
-    exit 0
 }
 
 # 查找可用的 Python（跳过 WindowsApps 占位符）
@@ -92,6 +92,11 @@ if (-not $pythonCmd) {
 }
 Write-Host "使用 Python: $pythonCmd" -ForegroundColor Cyan
 
+if ($Help) {
+    & $pythonCmd main.py --help
+    exit $LASTEXITCODE
+}
+
 # 创建虚拟环境（如不存在）
 $VenvDir = Join-Path $EngineDir "venv"
 if (-not (Test-Path $VenvDir)) {
@@ -114,6 +119,7 @@ if ($Model) { $PyArgs += "--model"; $PyArgs += $Model }
 if ($HostName) { $PyArgs += "--host"; $PyArgs += $HostName }
 if ($Port -gt 0) { $PyArgs += "--port"; $PyArgs += $Port }
 if ($Backend) { $PyArgs += "--backend"; $PyArgs += $Backend }
+if ($DryRun) { $PyArgs += "--dry-run" }
 if ($Mock) { $PyArgs += "--mock" }
 if ($MockFile) { $PyArgs += "--mock-file"; $PyArgs += $MockFile }
 

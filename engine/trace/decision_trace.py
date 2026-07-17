@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+from uuid import uuid4
 from typing import Optional
 from state.game_state import GameState, Card, Monster
 from communication.protocol import Decision
@@ -17,6 +18,7 @@ class DecisionStep:
     reasoning: str = ""
     elapsed_ms: int = 0
     state_snapshot: str = ""
+    decision_id: str = field(default_factory=lambda: uuid4().hex)
 
 
 @dataclass

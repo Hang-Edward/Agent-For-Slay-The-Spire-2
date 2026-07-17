@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 
 from .base import BaseLLMClient
@@ -49,6 +50,9 @@ class DryRunClient(BaseLLMClient):
 
     def _guess_decision(self, prompt: str) -> str:
         """根据 Prompt 内容猜测应该返回什么决策。"""
+        if "CHOOSE <index>" in prompt:
+            match = re.search(r"\[(\d+)\]\s+\[AVAILABLE\]", prompt)
+            return f"CHOOSE {match.group(1)}" if match else "CHOOSE 0"
         if "=== " in prompt and "===" in prompt:
             # 事件屏幕
             return "CHOOSE 0"

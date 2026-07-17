@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>STS2 AI 决策中心</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="status-bar">
+    <div><p class="eyebrow">SLAY THE SPIRE 2</p><h1>AI 决策中心</h1></div>
+    <div id="connection-status" class="status" aria-live="polite">等待 Agent</div>
+  </header>
+  <nav aria-label="视图">
+    <button data-view="live" aria-selected="true">实时</button>
+    <button data-view="history">历史</button>
+    <button data-view="debug">Debug</button>
+  </nav>
+  <main>
+    <section id="live-view" class="command-grid">
+      <div class="state-column">
+        <section class="panel overview-panel">
+          <div class="section-heading"><h2>当前进度</h2><span id="run-summary" class="run-summary">等待游戏</span></div>
+          <div id="player-summary" class="stat-grid"></div>
+        </section>
+        <section class="panel">
+          <div class="section-heading"><h2>敌人意图</h2><span id="enemy-count" class="count"></span></div>
+          <div id="enemy-list" class="enemy-list empty-state">尚未进入战斗</div>
+        </section>
+        <section class="panel hand-panel">
+          <div class="section-heading"><h2>当前手牌</h2><span id="hand-count" class="count"></span></div>
+          <div id="hand-list" class="hand-list empty-state">暂无手牌</div>
+        </section>
+      </div>
+
+      <section class="panel decision-panel">
+        <div class="section-heading"><h2>AI 当前决策</h2><span id="decision-source" class="source-badge">待命</span></div>
+        <div class="decision-hero">
+          <p class="label">准备执行</p>
+          <h3 id="decision-action">等待新的决策</h3>
+          <p id="decision-reason" class="decision-reason">进入对局后，这里会显示 AI 的动作与取舍理由。</p>
+        </div>
+        <div id="decision-metrics" class="decision-metrics"></div>
+        <div class="subheading"><h2>候选方案</h2><span>评分最高的 3 项</span></div>
+        <div id="candidate-list" class="candidate-list empty-state">暂无候选方案</div>
+      </section>
+
+      <section class="panel timeline-panel">
+        <div class="section-heading"><h2>决策过程</h2><span class="live-dot">实时</span></div>
+        <div id="event-stream" class="timeline empty-state">等待 AI 开始思考</div>
+      </section>
+    </section>
+
+    <section id="history-view" class="view" hidden>
+      <div class="page-heading"><div><p class="eyebrow">LOCAL ARCHIVE</p><h2>历史对局</h2></div></div>
+      <div id="history-list" class="history-list"></div>
+    </section>
+
+    <section id="debug-view" class="panel view debug-panel" hidden>
+      <div class="section-heading"><h2>原始状态</h2><span>用于故障排查</span></div>
+      <pre id="debug-content"></pre>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

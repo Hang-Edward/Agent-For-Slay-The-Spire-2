@@ -9,6 +9,7 @@ from .combat import CombatHandler
 from .card_reward import CardRewardHandler
 from .rest_site import RestSiteHandler
 from .event import EventHandler
+from .generic_choice import GenericChoiceHandler
 
 
 class DecisionRegistry:
@@ -16,6 +17,7 @@ class DecisionRegistry:
 
     def __init__(self):
         self._handlers: dict[str, DecisionHandler] = {}
+        self._choice_handler = GenericChoiceHandler()
 
     def register(self, handler: DecisionHandler, aliases: Optional[list[str]] = None):
         """注册一个处理器。
@@ -38,6 +40,8 @@ class DecisionRegistry:
         screen_type = raw_state.get("screen_type", "")
         if not screen_type:
             return None
+        if raw_state.get("options") and self._choice_handler.can_handle(screen_type, raw_state):
+            return self._choice_handler
         handler = self.get_handler(screen_type)
         if handler and handler.can_handle(screen_type, raw_state):
             return handler

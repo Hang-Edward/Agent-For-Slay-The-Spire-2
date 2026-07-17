@@ -96,6 +96,38 @@ class Monster:
 
 
 @dataclass
+class Teammate:
+    """公开的队友战斗状态，不包含其手牌内容。"""
+    net_id: str
+    character: str
+    current_hp: int
+    max_hp: int
+    block: int
+    energy: int
+    hand_count: int
+    turn: int
+    phase: str
+    is_alive: bool
+    powers: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, data: dict) -> "Teammate":
+        return cls(
+            net_id=str(data.get("net_id", "")),
+            character=data.get("character", ""),
+            current_hp=data.get("current_hp", 0),
+            max_hp=data.get("max_hp", 0),
+            block=data.get("block", 0),
+            energy=data.get("energy", 0),
+            hand_count=data.get("hand_count", 0),
+            turn=data.get("turn", 0),
+            phase=data.get("phase", "None"),
+            is_alive=data.get("is_alive", True),
+            powers=data.get("powers", []),
+        )
+
+
+@dataclass
 class GameState:
     """Complete game state."""
     screen_type: str
@@ -123,6 +155,12 @@ class GameState:
     action_in_progress: bool = False
     state_revision: int = 0
     gold: int = 0
+    room_type: str = ""
+    deck: list[Card] = field(default_factory=list)
+    options: list[dict] = field(default_factory=list)
+    teammates: list[Teammate] = field(default_factory=list)
+    team_actions: list[dict] = field(default_factory=list)
+    map_graph: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)  # original JSON
 
     @property
@@ -168,5 +206,11 @@ class GameState:
             action_in_progress=data.get("action_in_progress", False),
             state_revision=data.get("state_revision", 0),
             gold=data.get("player", {}).get("gold", 0),
+            room_type=data.get("room_type", ""),
+            deck=[Card.from_json(c) for c in data.get("deck", [])],
+            options=data.get("options", []),
+            teammates=[Teammate.from_json(item) for item in data.get("teammates", [])],
+            team_actions=data.get("team_actions", []),
+            map_graph=data.get("map", {}),
             raw=data,
         )

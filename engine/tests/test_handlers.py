@@ -85,6 +85,19 @@ class TestCombatHandler:
         assert self.handler.should_act(sd) is True
         assert self.handler.try_auto_decision(sd).type == "end_turn"
 
+    def test_fallback_chooses_a_playable_card_and_valid_target(self):
+        raw = copy.deepcopy(self.raw)
+        raw["hand"][0]["is_playable"] = False
+        raw["hand"][0]["playable_reason"] = "BlockedByStatus"
+        sd = self.handler.extract_state(raw)
+
+        decision = self.handler.fallback_decision(sd)
+
+        assert decision.type == "play_card"
+        assert decision.hand_index != 0
+        assert raw["hand"][decision.hand_index]["is_playable"] is True
+        assert decision.monster_index == 0
+
     def test_waits_while_mod_action_is_not_ready(self):
         raw = copy.deepcopy(self.raw)
         raw["decision_ready"] = False
@@ -144,7 +157,8 @@ class TestCombatHandlerBlockTest:
     def test_coT_in_prompt(self):
         sd = self.handler.extract_state(self.raw)
         prompt = self.handler.build_prompt(sd)
-        assert "Think step by step" in prompt
+        assert "whole remaining turn" in prompt
+        assert "no explanation" in prompt
 
 
 # ─── Card Reward Handler ───────────────────────────────────

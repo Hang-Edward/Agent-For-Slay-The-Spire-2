@@ -10,7 +10,7 @@ from typing import Optional
 
 
 class LLMRequestError(RuntimeError):
-    """模型请求失败；调用方必须停止本次决策，不能猜测动作。"""
+    """模型请求失败；调用方不得直接执行不完整的模型输出。"""
 
 
 class BaseLLMClient(ABC):

@@ -28,3 +28,11 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# Runtime data and local work state
+data/
+.superpowers/
+
+# Test build artifacts
+mod/tests/bin/
+mod/tests/obj/

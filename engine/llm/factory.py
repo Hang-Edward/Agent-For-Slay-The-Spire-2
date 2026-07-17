@@ -41,7 +41,7 @@ def create_llm_client(
         key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         if not key:
             raise ValueError("DeepSeek API key required. Set DEEPSEEK_API_KEY env var or pass --api-key")
-        return DeepSeekClient(api_key=key, model=model or "deepseek-chat")
+        return DeepSeekClient(api_key=key, model=model or "deepseek-v4-flash")
 
     elif backend == "ollama":
         from .ollama_client import OllamaClient

@@ -17,7 +17,7 @@ def load_skills_from_config(config_path: str) -> SkillsRegistry:
     if not os.path.exists(config_path):
         return registry
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if not data:
@@ -39,7 +39,7 @@ def load_skills_from_config(config_path: str) -> SkillsRegistry:
             registry.disable(skill_id)
 
     # Load custom skills
-    custom_skills = data.get("custom_skills", {})
+    custom_skills = data.get("custom_skills") or {}
     for skill_id, skill_data in custom_skills.items():
         if isinstance(skill_data, dict):
             skill = Skill.from_dict({"id": skill_id, **skill_data})

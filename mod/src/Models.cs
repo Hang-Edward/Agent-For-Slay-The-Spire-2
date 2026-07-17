@@ -42,7 +42,8 @@ public class StatusResponse
 /// <summary>游戏状态 JSON（与 Python 端 GameState 格式对齐）。</summary>
 public class GameStateJson
 {
-    [JsonPropertyName("screen_type")] public string ScreenType { get; set; } = "COMBAT";
+    [JsonPropertyName("screen_type")] public string ScreenType { get; set; } = "IDLE";
+    [JsonPropertyName("room_type")] public string RoomType { get; set; } = "";
     [JsonPropertyName("in_combat")] public bool InCombat { get; set; }
     [JsonPropertyName("decision_ready")] public bool DecisionReady { get; set; }
     [JsonPropertyName("action_in_flight")] public bool ActionInFlight { get; set; }
@@ -52,6 +53,11 @@ public class GameStateJson
     [JsonPropertyName("player")] public PlayerStateJson Player { get; set; } = new();
     [JsonPropertyName("monsters")] public List<MonsterStateJson> Monsters { get; set; } = new();
     [JsonPropertyName("hand")] public List<CardStateJson> Hand { get; set; } = new();
+    [JsonPropertyName("deck")] public List<CardStateJson> Deck { get; set; } = new();
+    [JsonPropertyName("options")] public List<ChoiceOptionJson> Options { get; set; } = new();
+    [JsonPropertyName("teammates")] public List<TeammateStateJson> Teammates { get; set; } = new();
+    [JsonPropertyName("team_actions")] public List<TeamActionJson> TeamActions { get; set; } = new();
+    [JsonPropertyName("map")] public MapGraphJson Map { get; set; } = new();
 
     [JsonPropertyName("draw_pile_count")] public int DrawPileCount { get; set; }
     [JsonPropertyName("discard_pile")] public List<CardStateJson> DiscardPile { get; set; } = new();
@@ -65,6 +71,65 @@ public class GameStateJson
     [JsonPropertyName("floor")] public int Floor { get; set; }
     [JsonPropertyName("ascension_level")] public int AscensionLevel { get; set; }
     [JsonPropertyName("class")] public string CharClass { get; set; } = "";
+}
+
+/// <summary>完整地图 DAG，供路线评分器比较后续房间分布。</summary>
+public class MapGraphJson
+{
+    [JsonPropertyName("current_node_id")] public string CurrentNodeId { get; set; } = "";
+    [JsonPropertyName("nodes")] public List<MapNodeJson> Nodes { get; set; } = new();
+}
+
+public class MapNodeJson
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("row")] public int Row { get; set; }
+    [JsonPropertyName("column")] public int Column { get; set; }
+    [JsonPropertyName("type")] public string Type { get; set; } = "";
+    [JsonPropertyName("children")] public List<string> Children { get; set; } = new();
+    [JsonPropertyName("visited")] public bool Visited { get; set; }
+}
+
+/// <summary>不泄露队友手牌内容，只暴露协作所需的公开战斗状态。</summary>
+public class TeammateStateJson
+{
+    [JsonPropertyName("net_id")] public string NetId { get; set; } = "";
+    [JsonPropertyName("character")] public string Character { get; set; } = "";
+    [JsonPropertyName("current_hp")] public int CurrentHp { get; set; }
+    [JsonPropertyName("max_hp")] public int MaxHp { get; set; }
+    [JsonPropertyName("block")] public int Block { get; set; }
+    [JsonPropertyName("energy")] public int Energy { get; set; }
+    [JsonPropertyName("hand_count")] public int HandCount { get; set; }
+    [JsonPropertyName("turn")] public int Turn { get; set; }
+    [JsonPropertyName("phase")] public string Phase { get; set; } = "None";
+    [JsonPropertyName("is_alive")] public bool IsAlive { get; set; }
+    [JsonPropertyName("powers")] public List<PowerStateJson> Powers { get; set; } = new();
+}
+
+public class TeamActionJson
+{
+    [JsonPropertyName("actor_net_id")] public string ActorNetId { get; set; } = "";
+    [JsonPropertyName("actor")] public string Actor { get; set; } = "";
+    [JsonPropertyName("description")] public string Description { get; set; } = "";
+    [JsonPropertyName("is_local")] public bool IsLocal { get; set; }
+}
+
+/// <summary>所有非战斗界面统一使用的可执行选项。</summary>
+public class ChoiceOptionJson
+{
+    [JsonPropertyName("index")] public int Index { get; set; }
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "choice";
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("description")] public string Description { get; set; } = "";
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+    [JsonPropertyName("cost")] public int Cost { get; set; } = -1;
+    [JsonPropertyName("selected")] public bool Selected { get; set; }
+    [JsonPropertyName("row")] public int Row { get; set; } = -1;
+    [JsonPropertyName("column")] public int Column { get; set; } = -1;
+    [JsonPropertyName("card")] public CardStateJson? Card { get; set; }
+    [JsonPropertyName("relic")] public RelicStateJson? Relic { get; set; }
+    [JsonPropertyName("potion")] public PotionStateJson? Potion { get; set; }
 }
 
 public class PlayerStateJson

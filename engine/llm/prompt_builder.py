@@ -69,37 +69,40 @@ def format_card_effect(card: Card) -> str:
     return card.description or "unknown effect"
 
 
-def build_combat_prompt(state: GameState, strategy_instructions: str = "") -> str:
+def build_combat_prompt(state: GameState, strategy_instructions: str = "", turn_plan: dict | None = None) -> str:
     """Build a complete prompt for the LLM to make a combat decision."""
 
     prompt_parts = []
 
     # System preamble
-    prompt_parts.append("""You are an expert Slay the Spire AI. Your task is to choose the optimal card to play.
+    prompt_parts.append("""You are an expert Slay the Spire AI. Choose the optimal next action.
 
-Think step by step:
-1. Assess the threat: how much damage will you take if you don't block?
-2. Check your resources: energy, HP, block, hand cards
-3. Evaluate each playable card: what's the best use of your energy?
-4. Pick the best action
+Use the supplied whole-turn analysis, HP budget, current state, and strategy guidance to evaluate the whole remaining turn. The state will be refreshed and replanned after every card.
 
-Then output your decision on the LAST line.
-
-OUTPUT FORMAT (last line only):
-- To play a card: PLAY <hand_index> <monster_index>
-- To use a potion: POTION <slot> <monster_index>
-- To end your turn: END
-
-Example: PLAY 0 0  (play hand card 0 on monster 0)
-Example: POTION 1 0 (use potion slot 1 on monster 0)
-Example: END       (end the turn)
-
-Your reasoning can go before the final command, but the last line MUST be the command.
+Return exactly ONE command and no explanation, reasoning, markdown, or punctuation:
+PLAY <hand_index> <monster_index>
+POTION <slot> <monster_index>
+END
 """)
 
     # Strategy instructions from skills system
     if strategy_instructions:
         prompt_parts.append(f"\n## Strategy\n{strategy_instructions}\n")
+
+    if turn_plan:
+        prompt_parts.append("\n## Whole-turn risk budget")
+        prompt_parts.append(
+            f"Incoming={turn_plan['incoming_damage']} | currently unblocked={turn_plan['unblocked_damage']} "
+            f"| risk={turn_plan['risk']} | acceptable HP loss={turn_plan['acceptable_hp_loss']}"
+        )
+        prompt_parts.append("Top feasible sequences (static estimates; card effects may require replanning):")
+        for sequence in turn_plan.get("candidate_sequences", [])[:6]:
+            prompt_parts.append(
+                f"  cards={sequence['cards']} {sequence['names']} | energy={sequence['cost']} "
+                f"| damage={sequence['damage']} | block={sequence['block']} "
+                f"| damage_avoided_by_kills={sequence['damage_avoided_by_kills']} "
+                f"| estimated_hp_loss={sequence['estimated_hp_loss']}"
+            )
 
     # Player status
     prompt_parts.append(f"""## Player Status
@@ -125,6 +128,29 @@ Your reasoning can go before the final command, but the last line MUST be the co
                 potion_info.append(f"{pot.get('name', '?')} (slot {pot.get('slot', 0)}, target: {target}{detail})")
         if potion_info:
             prompt_parts.append(f"- Potions: {', '.join(potion_info)}\n")
+
+    if state.teammates:
+        prompt_parts.append("\n## Teammates")
+        for mate in state.teammates:
+            prompt_parts.append(
+                f"- {mate.character} ({mate.net_id}): HP {mate.current_hp}/{mate.max_hp}, "
+                f"block {mate.block}, energy {mate.energy}, hand {mate.hand_count}, phase {mate.phase}"
+            )
+        teammate_actions = [action for action in state.team_actions if not action.get("is_local", False)]
+        if teammate_actions:
+            prompt_parts.append("Teammate actions this turn:")
+            for action in teammate_actions[-12:]:
+                prompt_parts.append(f"  - {action.get('description', '?')}")
+        prompt_parts.append(
+            "Coordinate with the resulting state: avoid duplicate lethal damage and account for teammate debuffs or setup. "
+            "Do not assume a teammate's personal block protects you."
+        )
+
+    local_actions = [action for action in state.team_actions if action.get("is_local", False)]
+    if local_actions:
+        prompt_parts.append("\n## Your actions already completed this turn")
+        for action in local_actions[-12:]:
+            prompt_parts.append(f"  - {action.get('description', '?')}")
 
     # Monsters
     prompt_parts.append("\n## Monsters\n")

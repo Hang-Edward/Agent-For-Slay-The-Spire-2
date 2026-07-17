@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Sts2AiMod;
 
@@ -83,7 +84,7 @@ public class AiHttpServer : IDisposable
             AwaitingDecision = DecisionGate.IsDecisionReady,
             ActionInFlight = DecisionGate.IsInFlight,
             StateRevision = StateSnapshotCache.Revision,
-            InGame = cm != null,
+            InGame = RunManager.Instance.IsInProgress,
         }));
     }
 

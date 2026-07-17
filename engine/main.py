@@ -10,12 +10,14 @@ and displays everything in a real-time TUI.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
 import signal
 import sys
 import time
+from uuid import uuid4
 
 from communication.mod_client import ModClient
 from communication.protocol import Decision
@@ -28,6 +30,14 @@ from skills.loader import load_skills_from_config
 from trace.decision_trace import DecisionStep
 from trace.trace_logger import TraceLogger
 from tui.app import TUIApp
+from strategy.team_coordinator import TeamCoordinator
+from dashboard.server import DashboardServer
+from explanation.decision_explainer import explain_decision, format_experience_evidence, normalized_candidates
+from history.rewards import RewardCalculator
+from history.run_store import RunHistoryStore
+from learning.experience_service import ExperienceService
+from learning.experience_store import ExperienceStore
+from telemetry.event_bus import DecisionEventBus
 
 
 class AIAgent:
@@ -76,19 +86,49 @@ class AIAgent:
 
         # ── Skills ──────────────────────────────────────────
         self.skills_registry = SkillsRegistry()
+        self.team_coordinator = TeamCoordinator()
         if config_path and os.path.exists(config_path):
             try:
                 self.skills_registry = load_skills_from_config(config_path)
+                import yaml
+                with open(config_path, encoding="utf-8") as config_file:
+                    config_data = yaml.safe_load(config_file) or {}
+                multiplayer = config_data.get("strategy", {}).get("multiplayer", {})
+                self.team_coordinator = TeamCoordinator(
+                    enabled=multiplayer.get("wait_for_teammates", True),
+                    timeout_seconds=float(multiplayer.get("wait_timeout_seconds", 20)),
+                )
             except Exception as e:
                 print(f"Warning: Failed to load config: {e}")
 
         # ── 追踪 ────────────────────────────────────────────
         self.trace_logger = TraceLogger()
 
+        # ── 实时面板、历史与经验学习 ────────────────────────
+        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.data_dir = os.path.join(project_dir, "data")
+        self.event_bus = DecisionEventBus(secret_values=(api_key,))
+        self.history_store = RunHistoryStore(self.data_dir)
+        self.event_bus.add_sink(self.history_store)
+        self.reward_calculator = RewardCalculator()
+        self.experience_store = ExperienceStore(os.path.join(self.data_dir, "experience.sqlite3"))
+        self.experience_service = ExperienceService(self.experience_store)
+        self.dashboard = DashboardServer(self.event_bus, self.history_store)
+        self.current_run_id = ""
+        self.current_battle_id = ""
+        self.run_completed = False
+        self.pending_transition: dict | None = None
+        self.policy_version = "experience-v1"
+
         # ── 状态追踪 ────────────────────────────────────────
         self.running = False
         self.current_state_raw: dict | None = None
         self.last_screen_id: str = ""       # 用于避免重复决策
+        self.next_decision_time: float = 0.0  # 失败后限速重试，避免永久卡住或高频请求
+        self.last_action_time: float = 0.0
+        self.last_decision: Decision | None = None
+        self.stalled_options: dict[str, set[int]] = {}
+        self.decision_failure_count: int = 0
         self.mock_file_list: list[str] = []  # mock 多文件模式
 
     # ─── 公共接口 ───────────────────────────────────────────
@@ -101,6 +141,13 @@ class AIAgent:
             sys.exit(1)
 
         self.running = True
+        try:
+            self.dashboard.start()
+            print(f"Decision dashboard: {self.dashboard.url}")
+            self._emit("dashboard_started", {"url": self.dashboard.url, "phase": "waiting_for_game"})
+        except OSError as error:
+            print(f"Dashboard unavailable; Agent will continue: {error}")
+            self._emit("dashboard_error", {"message": str(error)})
         self.tui.start()
 
         # 初始化连接状态
@@ -110,7 +157,7 @@ class AIAgent:
         else:
             connected = self.client.is_connected()
             self.tui.set_status(
-                f"{'Connected' if connected else 'Disconnected — waiting for mod...'} "
+                f"{'Connected' if connected else 'Disconnected - waiting for mod...'} "
                 f"({self.client.base_url})",
                 connected=connected,
             )
@@ -120,7 +167,12 @@ class AIAgent:
         except KeyboardInterrupt:
             pass
         finally:
-            self.tui.stop()
+            for closer in (self.dashboard.stop, self.history_store.close,
+                           self.experience_store.close, self.tui.stop):
+                try:
+                    closer()
+                except Exception as error:
+                    print(f"Shutdown warning: {error}")
 
     def stop(self):
         """停止 AI Agent。"""
@@ -131,61 +183,129 @@ class AIAgent:
     def _main_loop(self):
         """主循环：轮询游戏状态，根据屏幕类型分派决策。"""
         while self.running:
-            # 获取状态
-            state = self.client.get_state()
-            if state is None:
-                time.sleep(0.2)
-                continue
+            try:
+                self._run_iteration()
+            except Exception as error:
+                # 单个未知界面或瞬时解析错误不能终止无人值守进程。
+                message = f"Agent iteration failed; retrying in 2s: {error}"
+                print(f"\n{message}")
+                self.tui.update_reasoning(message)
+                self._emit("decision_error", {"message": str(error), "phase": "error"})
+                self.tui.refresh()
+                time.sleep(2.0)
 
-            self.current_state_raw = state.raw if hasattr(state, 'raw') else {}
-            self.tui.update_state(state)
+    def _run_iteration(self):
+        state = self.client.get_state()
+        if state is None:
+            time.sleep(0.2)
+            return
 
-            # 根据屏幕类型找到对应的决策处理器
-            handler = self.registry.get_handler_for_state(self.current_state_raw)
-            if handler is not None:
-                state_data = handler.extract_state(self.current_state_raw)
-                screen_id = self._compute_screen_id(
-                    handler.screen_type, state_data
-                )
+        raw_state = state.raw if hasattr(state, "raw") else {}
+        self._settle_pending_transition(raw_state)
+        self.current_state_raw = raw_state
+        self._ensure_run(raw_state)
+        self._emit("state_received", {
+            "phase": "reading_state",
+            "snapshot_patch": {"game_state": raw_state},
+        })
+        self._complete_run_if_needed(raw_state)
+        self.tui.update_state(state)
 
-                # 如果屏幕状态发生变化，需要做新决策
-                if screen_id != self.last_screen_id and handler.should_act(state_data):
-                    self._make_decision(state, handler, state_data)
-                    self.last_screen_id = screen_id
+        handler = self.registry.get_handler_for_state(self.current_state_raw)
+        if handler is not None:
+            state_data = handler.extract_state(self.current_state_raw)
+            screen_id = self._compute_screen_id(handler.screen_type, state_data)
+            now = time.monotonic()
+            waiting_for_team = False
+            if handler.screen_type == "COMBAT":
+                waiting_for_team, wait_reason = self.team_coordinator.should_wait(state_data["game_state"])
+                if waiting_for_team:
+                    self.tui.update_reasoning(wait_reason)
+                    self._emit("waiting_for_team", {"reason": wait_reason, "phase": "waiting_for_team"})
 
-            # 更新 TUI 状态栏
-            screen = self.current_state_raw.get("screen_type", "?")
-            in_combat = self.current_state_raw.get("in_combat", False)
-            turn = state.turn if hasattr(state, 'turn') else 0
-            act = state.act if hasattr(state, 'act') else 1
-            floor = state.floor if hasattr(state, 'floor') else 1
-
-            mode_name = self.llm.name
-            status = (
-                f"[{screen}] {mode_name}"
-                f" | {'Turn ' + str(turn) if in_combat else ''}"
-                f" | Act {act} Floor {floor}"
+            # Mod 的门闩会在 10 秒后释放无进展动作；Agent 随后必须允许同屏重试。
+            stalled = (
+                screen_id == self.last_screen_id
+                and self.last_action_time > 0
+                and now - self.last_action_time >= 12.0
+                and self.current_state_raw.get("decision_ready", False)
+                and not self.current_state_raw.get("action_in_flight", False)
             )
-            self.tui.set_status(status, connected=True)
-            self.tui.refresh()
+            if stalled:
+                if self.last_decision and self.last_decision.type == "choose_option":
+                    self.stalled_options.setdefault(screen_id, set()).add(
+                        self.last_decision.option_index
+                    )
+                self.last_screen_id = ""
+                self.next_decision_time = now
+                self.tui.update_reasoning("No state progress after action; choosing again")
 
-            time.sleep(0.3)
+            avoided = self.stalled_options.get(screen_id, set())
+            if avoided:
+                state_data["stalled_option_indices"] = sorted(avoided)
+
+            if (
+                screen_id != self.last_screen_id
+                and now >= self.next_decision_time
+                and not waiting_for_team
+                and handler.should_act(state_data)
+            ):
+                if self._make_decision(state, handler, state_data):
+                    self.last_screen_id = screen_id
+                    self.last_action_time = time.monotonic()
+                    self.next_decision_time = 0.0
+                    self.decision_failure_count = 0
+                else:
+                    self.decision_failure_count += 1
+                    retry_delay = min(30.0, 2.0 ** min(self.decision_failure_count, 5))
+                    self.next_decision_time = time.monotonic() + retry_delay
+
+        screen = self.current_state_raw.get("screen_type", "?")
+        in_combat = self.current_state_raw.get("in_combat", False)
+        status = (
+            f"[{screen}] {self.llm.name}"
+            f" | {'Turn ' + str(state.turn) if in_combat else ''}"
+            f" | Act {state.act} Floor {state.floor}"
+        )
+        self.tui.set_status(status, connected=True)
+        self.tui.refresh()
+        time.sleep(0.3)
 
     # ─── 决策 ───────────────────────────────────────────────
 
-    def _make_decision(self, state, handler, state_data):
+    def _make_decision(self, state, handler, state_data) -> bool:
         """执行一次决策：构建 Prompt → 调用 LLM → 解析 → 执行。"""
-        start_time = time.time()
-
-        # 获取 Skills 策略指令
         strategy_instructions = self.skills_registry.get_enabled_instructions()
-        enabled_skill_names = [s.name for s in self.skills_registry.enabled_skills]
-
-        # 构建 Prompt
-        prompt = handler.build_prompt(state_data, strategy_instructions)
+        candidates = normalized_candidates(handler.screen_type, state_data)
+        current_state = getattr(self, "current_state_raw", {}) or {}
+        experience_service = getattr(self, "experience_service", None)
+        if experience_service is not None:
+            adjusted = experience_service.apply(current_state, candidates)
+        else:
+            # 兼容绕过构造函数的轻量测试和诊断环境。
+            adjusted = [
+                {
+                    **candidate,
+                    "baseline_score": candidate.get("score", 0.0),
+                    "historical_adjustment": 0.0,
+                    "final_score": candidate.get("score", 0.0),
+                    "sample_count": 0,
+                    "confidence": 0.0,
+                }
+                for candidate in candidates
+            ]
+        evidence = format_experience_evidence(adjusted)
+        combined = "\n".join(part for part in (strategy_instructions, evidence) if part)
+        prompt = handler.build_prompt(state_data, combined)
+        self._emit("candidates_scored", {
+            "phase": "evaluating_candidates",
+            "candidates": adjusted,
+            "snapshot_patch": {"current_decision": {
+                "screen_type": handler.screen_type, "status": "evaluating",
+                "candidates": adjusted, "prompt": prompt,
+            }},
+        })
         self.tui.update_reasoning(f"{handler.screen_type}: Calling LLM...")
-
-        # 追踪记录
         step = DecisionStep(
             turn=getattr(state, 'turn', 0),
             prompt=prompt,
@@ -198,37 +318,52 @@ class AIAgent:
         auto_decision = handler.try_auto_decision(state_data)
         if auto_decision is not None:
             response = auto_decision.to_llm_format()
-            elapsed_ms = 0
-            decision = auto_decision
             reasoning = f"[auto] {response}"
             self.tui.update_reasoning(reasoning)
-            self.tui.add_decision(response, decision, 0)
+            self.tui.add_decision(response, auto_decision, 0)
             self.tui.refresh()
             step.llm_response = response
-            step.decision = decision
+            step.decision = auto_decision
             step.elapsed_ms = 0
             self.trace_logger.add_step(step)
-            print(f"\n[{handler.screen_type}] Auto: {decision}")
-            if not self.client.post_decision(decision):
-                self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
-            return
+            print(f"\n[{handler.screen_type}] Auto: {auto_decision}")
+            return self._submit_decision(auto_decision, step, "auto", adjusted, response)
 
-        # 调用 LLM
+        self._emit("llm_started", {"phase": "waiting_for_deepseek", "prompt": prompt})
         try:
             response, elapsed = self.llm.think(prompt)
             elapsed_ms = int(elapsed * 1000)
-
-            # 解析并校验响应；异常时本次状态不执行任何动作。
+            self._emit("llm_finished", {"phase": "parsing_response", "response": response,
+                                        "elapsed_ms": elapsed_ms})
             decision = handler.parse_response(response, state_data)
         except (LLMRequestError, InvalidDecisionError) as error:
-            message = f"[{handler.screen_type}] Decision stopped: {error}"
+            decision = handler.fallback_decision(state_data)
+            if decision is None:
+                message = f"[{handler.screen_type}] Decision stopped: {error}"
+                self.tui.update_reasoning(message)
+                self.tui.refresh()
+                step.reasoning = message
+                step.llm_response = locals().get("response", "")
+                self.trace_logger.add_step(step)
+                print(f"\n{message}")
+                self._emit("decision_error", {"message": str(error), "prompt": prompt,
+                                              "phase": "error"})
+                return False
+
+            message = (
+                f"[{handler.screen_type}] Model decision failed: {error}; "
+                f"using safe fallback {decision}"
+            )
             self.tui.update_reasoning(message)
+            self.tui.add_decision(locals().get("response", ""), decision, 0)
             self.tui.refresh()
             step.reasoning = message
             step.llm_response = locals().get("response", "")
+            step.decision = decision
             self.trace_logger.add_step(step)
             print(f"\n{message}")
-            return
+            return self._submit_decision(decision, step, "fallback", adjusted,
+                                         locals().get("response", ""), str(error))
 
         # 更新 TUI
         reasoning = f"[{handler.screen_type}] LLM ({elapsed_ms}ms): {response[:100]}"
@@ -242,13 +377,107 @@ class AIAgent:
         step.elapsed_ms = elapsed_ms
         self.trace_logger.add_step(step)
 
-        print(f"\n[{handler.screen_type}] LLM: {response.strip()} → {decision} ({elapsed_ms}ms)")
+        print(f"\n[{handler.screen_type}] LLM: {response.strip()} -> {decision} ({elapsed_ms}ms)")
 
-        # 发送决策
-        if not self.client.post_decision(decision):
-            self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
+        return self._submit_decision(decision, step, "llm", adjusted, response)
 
     # ─── 辅助方法 ───────────────────────────────────────────
+
+    def _emit(self, event_type: str, payload: dict) -> None:
+        if not hasattr(self, "event_bus"):
+            return
+        try:
+            current_state = getattr(self, "current_state_raw", {}) or {}
+            self.event_bus.publish(
+                event_type, payload, run_id=getattr(self, "current_run_id", ""),
+                battle_id=getattr(self, "current_battle_id", ""),
+                state_revision=int(current_state.get("state_revision", 0)),
+            )
+        except Exception as error:
+            print(f"Telemetry warning: {error}")
+
+    def _ensure_run(self, raw_state: dict) -> None:
+        screen = raw_state.get("screen_type", "")
+        if getattr(self, "current_run_id", "") or int(raw_state.get("act", 0)) <= 0 or screen == "MAIN_MENU":
+            return
+        self.current_run_id = uuid4().hex
+        self.current_battle_id = uuid4().hex if raw_state.get("in_combat") else ""
+        self.run_completed = False
+        self._emit("run_started", {
+            "character": raw_state.get("class", ""), "act": raw_state.get("act", 0),
+            "floor": raw_state.get("floor", 0), "phase": "run_started",
+        })
+
+    def _settle_pending_transition(self, raw_state: dict) -> None:
+        pending = getattr(self, "pending_transition", None)
+        revision = int(raw_state.get("state_revision", 0))
+        if not pending or revision <= pending["before_revision"]:
+            return
+        reward = self.reward_calculator.transition(pending["before_state"], raw_state)
+        self.experience_store.add_transition(
+            self.current_run_id, pending["before_state"], pending["action_key"],
+            reward.total, "in_progress", self.policy_version,
+        )
+        self._emit("transition_observed", {
+            "decision_id": pending["decision_id"], "reward": {
+                "total": reward.total, "components": reward.components,
+                "reward_version": reward.reward_version,
+            }, "phase": "state_advanced",
+        })
+        self.pending_transition = None
+
+    def _complete_run_if_needed(self, raw_state: dict) -> None:
+        if not getattr(self, "current_run_id", "") or getattr(self, "run_completed", False):
+            return
+        screen = raw_state.get("screen_type", "")
+        if screen not in {"GAME_OVER", "VICTORY"}:
+            return
+        result = "victory" if screen == "VICTORY" else "loss"
+        terminal = self.reward_calculator.terminal({"result": result, "floor": raw_state.get("floor", 0)})
+        self.experience_store.finalize_run(self.current_run_id, result, terminal.total)
+        self._emit("run_completed", {"result": result, "floor": raw_state.get("floor", 0),
+                                     "terminal_reward": terminal.total, "phase": "run_completed"})
+        self.run_completed = True
+
+    def _submit_decision(self, decision: Decision, step: DecisionStep, source: str,
+                         candidates: list[dict], response: str, error: str = "") -> bool:
+        current_state = getattr(self, "current_state_raw", {}) or {}
+        selected = candidates[0] if candidates else None
+        if decision.type == "choose_option":
+            selected = next((item for item in candidates
+                             if item.get("action_key") == f"choice:{decision.option_index}"), selected)
+        explanation = explain_decision("COMBAT" if decision.type in {"play_card", "end_turn", "use_potion"}
+                                       else "CHOICE", {}, selected, source)
+        event_type = "fallback_selected" if source == "fallback" else "decision_parsed"
+        payload = {
+            "decision_id": step.decision_id, "source": source, "action": decision.to_json(),
+            "command": decision.to_llm_format(), "explanation": explanation,
+            "candidates": candidates, "prompt": step.prompt, "response": response,
+            "elapsed_ms": step.elapsed_ms, "error": error, "pre_state": current_state,
+            "phase": "submitting_action", "snapshot_patch": {"current_decision": {
+                "decision_id": step.decision_id, "source": source, "action": decision.to_json(),
+                "command": decision.to_llm_format(), "explanation": explanation,
+                "candidates": candidates, "elapsed_ms": step.elapsed_ms,
+            }},
+        }
+        self._emit(event_type, payload)
+        self._emit("action_sent", {"decision_id": step.decision_id,
+                                   "action": decision.to_json(), "phase": "submitting_action"})
+        if not self.client.post_decision(decision):
+            self._emit("action_rejected", {"decision_id": step.decision_id,
+                                           "action": decision.to_json(), "phase": "action_rejected"})
+            self.tui.update_reasoning("Action rejected by mod; waiting for a new state")
+            return False
+        self._emit("action_accepted", {"decision_id": step.decision_id,
+                                       "action": decision.to_json(), "phase": "waiting_for_game"})
+        self.pending_transition = {
+            "decision_id": step.decision_id,
+            "before_revision": int(current_state.get("state_revision", 0)),
+            "before_state": deepcopy(current_state),
+            "action_key": decision.to_llm_format(),
+        }
+        self.last_decision = decision
+        return True
 
     def _compute_screen_id(self, screen_type: str, state_data: dict) -> str:
         """为当前屏幕生成唯一 ID，用于判断是否需要新决策。"""
@@ -300,7 +529,7 @@ def main():
     if not args.mock and os.path.exists(config_path):
         try:
             import yaml
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f)
             llm_cfg = cfg.get("llm", {})
             if not backend:

@@ -6,6 +6,7 @@ from state.game_state import GameState
 from llm.prompt_builder import build_combat_prompt
 from llm.response_parser import InvalidDecisionError, parse_llm_response
 from communication.protocol import Decision
+from strategy.combat_planner import analyze_turn
 
 from typing import Optional
 
@@ -28,6 +29,7 @@ class CombatHandler(DecisionHandler):
         ]
         return {
             "game_state": game_state,
+            "turn_plan": analyze_turn(game_state),
             "playable_cards": playable,
             "has_playable_cards": len(playable) > 0,
             "has_alive_monsters": len(game_state.alive_monsters) > 0,
@@ -35,7 +37,7 @@ class CombatHandler(DecisionHandler):
 
     def build_prompt(self, state_data: dict, strategy_instructions: str = "") -> str:
         game_state = state_data["game_state"]
-        return build_combat_prompt(game_state, strategy_instructions)
+        return build_combat_prompt(game_state, strategy_instructions, state_data["turn_plan"])
 
     def parse_response(self, llm_response: str, state_data: dict) -> Decision:
         decision = parse_llm_response(llm_response)
@@ -71,17 +73,28 @@ class CombatHandler(DecisionHandler):
         return game_state.decision_ready and state_data["has_alive_monsters"]
 
     def try_auto_decision(self, state_data: dict) -> Optional[Decision]:
-        """当只有一张可玩卡牌时自动出牌，跳过 LLM 调用。"""
+        """没有合法牌时自动结束；其余情况交给整回合规划决定是否值得出牌。"""
         playable = state_data.get("playable_cards", [])
         if len(playable) == 0:
             return Decision.end_turn()
-        if len(playable) == 1:
-            idx, card = playable[0]
-            monsters = state_data["game_state"].targetable_monsters
-            target = 0
-            if card.has_target and len(monsters) > 0:
-                monster = min(monsters, key=lambda m: m.current_hp)
-                fallback_index = monsters.index(monster)
-                target = monster.target_index if monster.target_index >= 0 else fallback_index
-            return Decision.play_card(idx, target)
         return None
+
+    def fallback_decision(self, state_data: dict) -> Optional[Decision]:
+        """仅在模型失败时选择合法牌，避免非法索引让整局永久停住。"""
+        playable = state_data.get("playable_cards", [])
+        if not playable:
+            return Decision.end_turn()
+
+        game_state = state_data["game_state"]
+        targets = game_state.targetable_monsters
+        target = min(targets, key=lambda monster: monster.current_hp) if targets else None
+        target_index = (
+            target.target_index if target is not None and target.target_index >= 0 else 0
+        )
+
+        # 优先打出费用较高的合法牌，减少因剩余能量不足造成的空转。
+        hand_index, _card = max(
+            playable,
+            key=lambda item: (item[1].cost_for_turn, -item[0]),
+        )
+        return Decision.play_card(hand_index, target_index)

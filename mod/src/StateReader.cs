@@ -1,11 +1,14 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
+using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Sts2AiMod;
 
@@ -15,30 +18,57 @@ public static class StateReader
     /// <summary>读取完整游戏状态。</summary>
     public static GameStateJson? ReadFullState(CombatManager? combatManager)
     {
-        if (combatManager == null) return null;
-
         try
         {
+            var result = new GameStateJson();
+            var runState = RunManager.Instance.DebugOnlyGetState();
+            var player = runState == null ? null : LocalContext.GetMe(runState);
+
+            if (runState != null)
+            {
+                result.Act = runState.CurrentActIndex + 1;
+                result.Floor = runState.ActFloor;
+                result.AscensionLevel = runState.AscensionLevel;
+                result.RoomType = runState.CurrentRoom?.RoomType.ToString().ToUpperInvariant() ?? "";
+                ReadMap(runState, result);
+            }
+
+            if (player != null)
+            {
+                ReadPlayer(player, result);
+                result.Deck.AddRange(player.Deck.Cards.Select(c => ReadCard(c, player, PileType.Deck)));
+                if (runState != null)
+                    ReadTeammates(runState.Players, player, result);
+            }
+
+            if (combatManager == null)
+            {
+                UiStateReader.Apply(result);
+                return result;
+            }
+
             var stateField = combatManager.GetType()
                 .GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance);
             var state = stateField?.GetValue(combatManager);
-            if (state == null) return null;
-
-            var result = new GameStateJson();
+            if (state == null)
+            {
+                UiStateReader.Apply(result);
+                return result;
+            }
 
             // 读取玩家
             var playersProp = state.GetType().GetProperty("Players");
             var players = playersProp?.GetValue(state) as System.Collections.IEnumerable;
-            var player = players?.Cast<Player>().FirstOrDefault();
-            if (player != null)
+            var combatPlayer = players?.Cast<Player>().FirstOrDefault() ?? player;
+            if (combatPlayer != null && player == null)
             {
-                ReadPlayer(player, result);
+                ReadPlayer(combatPlayer, result);
             }
 
             // 读取怪物（敌人）
             var enemiesProp = state.GetType().GetProperty("Enemies");
             var enemies = enemiesProp?.GetValue(state) as System.Collections.IEnumerable;
-            var combatState = player?.Creature.CombatState;
+            var combatState = combatPlayer?.Creature.CombatState;
             var playerTargets = combatState?.PlayerCreatures ?? Array.Empty<Creature>();
             var hittableEnemies = combatState?.HittableEnemies ?? Array.Empty<Creature>();
             if (enemies != null)
@@ -53,13 +83,23 @@ public static class StateReader
             bool inProgress = isInProgressProp?.GetValue(combatManager) is true;
             bool isOver = isOverProp?.GetValue(combatManager) is true;
             result.InCombat = inProgress && !isOver;
-            result.ActionInProgress = player != null &&
-                (combatManager.IsExecutingCardOrPotionEffect(player) ||
+            result.ActionInProgress = combatPlayer != null &&
+                (combatManager.IsExecutingCardOrPotionEffect(combatPlayer) ||
                  combatManager.EndingPlayerTurnPhaseOne ||
                  combatManager.EndingPlayerTurnPhaseTwo);
 
             var roundProp = state.GetType().GetProperty("RoundNumber");
             result.Turn = (int)(roundProp?.GetValue(state) ?? 0);
+
+            if (player != null)
+            {
+                if (combatState != null)
+                    ReadTeamActions(combatManager, combatState, player, result);
+            }
+
+            if (result.InCombat)
+                result.ScreenType = "COMBAT";
+            UiStateReader.Apply(result);
 
             return result;
         }
@@ -69,6 +109,91 @@ public static class StateReader
             return null;
         }
     }
+
+    private static void ReadMap(RunState runState, GameStateJson result)
+    {
+        var map = runState.Map;
+        if (map == null) return;
+
+        var points = new HashSet<MapPoint>(map.GetAllMapPoints());
+        points.UnionWith(map.startMapPoints);
+        points.Add(map.StartingMapPoint);
+        points.Add(map.BossMapPoint);
+        if (map.SecondBossMapPoint != null) points.Add(map.SecondBossMapPoint);
+
+        result.Map.CurrentNodeId = runState.CurrentMapCoord is { } current
+            ? MapNodeId(current.row, current.col)
+            : "";
+        var visited = runState.VisitedMapCoords
+            .Select(coord => MapNodeId(coord.row, coord.col))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var uniquePoints = points
+            .GroupBy(point => MapNodeId(point.coord.row, point.coord.col))
+            .Select(group => group.OrderByDescending(point => point.Children.Count).First());
+        foreach (var point in uniquePoints.OrderBy(point => point.coord.row).ThenBy(point => point.coord.col))
+        {
+            var id = MapNodeId(point.coord.row, point.coord.col);
+            result.Map.Nodes.Add(new MapNodeJson
+            {
+                Id = id,
+                Row = point.coord.row,
+                Column = point.coord.col,
+                Type = point.PointType.ToString().ToUpperInvariant(),
+                Children = point.Children
+                    .Select(child => MapNodeId(child.coord.row, child.coord.col))
+                    .OrderBy(child => child, StringComparer.Ordinal)
+                    .ToList(),
+                Visited = visited.Contains(id),
+            });
+        }
+    }
+
+    private static void ReadTeammates(IEnumerable<Player> players, Player localPlayer, GameStateJson result)
+    {
+        foreach (var teammate in players.Where(player => !ReferenceEquals(player, localPlayer)))
+        {
+            var pcs = teammate.PlayerCombatState;
+            result.Teammates.Add(new TeammateStateJson
+            {
+                NetId = teammate.NetId.ToString(),
+                Character = teammate.Character.Id.ToString(),
+                CurrentHp = teammate.Creature.CurrentHp,
+                MaxHp = teammate.Creature.MaxHp,
+                Block = teammate.Creature.Block,
+                Energy = pcs?.Energy ?? 0,
+                HandCount = pcs?.Hand.Cards.Count ?? 0,
+                Turn = pcs?.TurnNumber ?? 0,
+                Phase = pcs?.Phase.ToString() ?? "None",
+                IsAlive = teammate.Creature.IsAlive,
+                Powers = ReadPowers(teammate.Creature),
+            });
+        }
+    }
+
+    private static void ReadTeamActions(
+        CombatManager combatManager,
+        ICombatState combatState,
+        Player localPlayer,
+        GameStateJson result)
+    {
+        foreach (var entry in combatManager.History.Entries
+                     .Where(entry => entry.HappenedThisTurn(combatState) && entry.Actor.IsPlayer)
+                     .TakeLast(30))
+        {
+            var actor = entry.Actor.Player;
+            if (actor == null) continue;
+            result.TeamActions.Add(new TeamActionJson
+            {
+                ActorNetId = actor.NetId.ToString(),
+                Actor = actor.Character.Id.ToString(),
+                Description = entry.Description,
+                IsLocal = ReferenceEquals(actor, localPlayer),
+            });
+        }
+    }
+
+    private static string MapNodeId(int row, int column) => $"{row}:{column}";
 
     private static void ReadPlayer(Player player, GameStateJson result)
     {
@@ -169,7 +294,7 @@ public static class StateReader
         };
     }
 
-    private static CardStateJson ReadCard(CardModel card, Player player)
+    internal static CardStateJson ReadCard(CardModel card, Player player, PileType pileType = PileType.Hand)
     {
         var cost = card.EnergyCost.Canonical;
         var costForTurn = card.EnergyCost.GetAmountToSpend();
@@ -197,7 +322,7 @@ public static class StateReader
             MagicNumber = GetMagicNumber(vars),
             Exhausts = card.Keywords.Any(k => k.ToString() == "Exhaust") || ReadBoolPropertyOrField(card, "ExhaustOnNextPlay"),
             Ethereal = card.Keywords.Any(k => k.ToString() == "Ethereal"),
-            Description = SafeText(() => card.GetDescriptionForPile(PileType.Hand, target)),
+            Description = SafeText(() => card.GetDescriptionForPile(pileType, target)),
         };
     }
 
@@ -332,7 +457,7 @@ public static class StateReader
         return field?.GetValue(obj) is bool fieldValue && fieldValue;
     }
 
-    private static string SafeText(Func<string> read)
+    internal static string SafeText(Func<string> read)
     {
         try { return read(); }
         catch { return ""; }

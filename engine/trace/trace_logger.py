@@ -49,7 +49,9 @@ class TraceLogger:
             "won": trace.won,
             "steps": [
                 {
+                    "decision_id": s.decision_id,
                     "turn": s.turn,
+                    "prompt": s.prompt,
                     "reasoning": s.reasoning,
                     "llm_response": s.llm_response,
                     "decision": str(s.decision),

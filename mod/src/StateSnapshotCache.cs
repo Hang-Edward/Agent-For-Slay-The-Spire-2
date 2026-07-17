@@ -63,6 +63,7 @@ public static class DecisionGate
     private static int _baselineTurn;
     private static int _lastTurn;
     private static DateTime _notBeforeUtc;
+    private static DateTime _deadlineUtc;
 
     public static bool IsInFlight
     {
@@ -86,6 +87,7 @@ public static class DecisionGate
             _baselineFingerprint = _lastFingerprint;
             _baselineTurn = _lastTurn;
             _notBeforeUtc = DateTime.UtcNow.AddMilliseconds(150);
+            _deadlineUtc = DateTime.UtcNow.AddSeconds(10);
             return true;
         }
     }
@@ -107,19 +109,17 @@ public static class DecisionGate
             _lastFingerprint = fingerprint;
             _lastTurn = state.Turn;
 
-            if (!state.InCombat)
-            {
-                _inFlight = false;
-                _actionType = "";
-            }
-            else if (_inFlight && IsSettled(state, fingerprint))
+            if (_inFlight && IsSettled(state, fingerprint))
             {
                 _inFlight = false;
                 _actionType = "";
             }
 
             var isPlayPhase = string.Equals(state.Player.Phase, "Play", StringComparison.Ordinal);
-            _decisionReady = state.InCombat && isPlayPhase && !state.ActionInProgress && !_inFlight;
+            var combatReady = state.InCombat && state.ScreenType == "COMBAT" && isPlayPhase;
+            var choiceReady = state.ScreenType != "COMBAT" && state.Options.Any(o => o.Enabled);
+            _decisionReady = DecisionGatePolicy.CanAcceptDecision(
+                combatReady, choiceReady, state.ActionInProgress, _inFlight);
             state.ActionInFlight = _inFlight;
             state.DecisionReady = _decisionReady;
         }
@@ -127,8 +127,17 @@ public static class DecisionGate
 
     private static bool IsSettled(GameStateJson state, string fingerprint)
     {
-        if (DateTime.UtcNow < _notBeforeUtc || state.ActionInProgress) return false;
-        if (!string.Equals(state.Player.Phase, "Play", StringComparison.Ordinal)) return false;
+        if (DateTime.UtcNow >= _deadlineUtc)
+        {
+            ModLogger.Log($"Action {_actionType} timed out waiting for state change; releasing gate");
+            return true;
+        }
+        var notBeforeElapsed = DateTime.UtcNow >= _notBeforeUtc;
+        if (!notBeforeElapsed) return false;
+
+        var choiceReady = state.ScreenType != "COMBAT" && state.Options.Any(o => o.Enabled);
+        if (DecisionGatePolicy.ShouldSettleOnChoice(choiceReady, notBeforeElapsed)) return true;
+        if (state.ActionInProgress) return false;
 
         if (string.Equals(_actionType, "end_turn", StringComparison.Ordinal))
             return state.Turn > _baselineTurn;

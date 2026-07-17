@@ -83,3 +83,7 @@ class DecisionHandler(ABC):
             Decision 或 None（表示需要 LLM 决策）
         """
         return None
+
+    def fallback_decision(self, state_data: dict) -> Optional[Decision]:
+        """模型不可用或输出非法时返回保证流程继续的安全动作。"""
+        return self.try_auto_decision(state_data)

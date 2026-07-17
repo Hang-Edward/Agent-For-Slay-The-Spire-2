@@ -116,6 +116,50 @@ class SkillsRegistry:
                 prompt_instruction="When choosing map paths, prioritize routes with more elite encounters for better rewards.",
                 category="pathing",
             ),
+            Skill(
+                id="adaptive_hp_trade",
+                name="动态卖血",
+                description="根据致死风险、血量比例和击杀收益决定卖血或保血",
+                prompt_instruction=(
+                    "Use the whole-turn risk budget. Do not block automatically: accept small HP loss when it secures "
+                    "a kill or major tempo and HP is healthy, but preserve HP before elites/bosses and never accept lethal risk."
+                ),
+                category="combat",
+                priority=8,
+            ),
+            Skill(
+                id="deck_coherence",
+                name="卡组完整性",
+                description="根据卡组职责缺口和重复饱和度选牌",
+                prompt_instruction=(
+                    "For card rewards, use the deck profile and marginal deck-fit score. Fill missing damage, block, draw, "
+                    "energy, or scaling; skip mediocre cards that only bloat the deck."
+                ),
+                category="deckbuilding",
+                priority=7,
+            ),
+            Skill(
+                id="adaptive_pathing",
+                name="动态路线",
+                description="在奖励密度、战损、金币和商店之间动态取舍",
+                prompt_instruction=(
+                    "Use full-map route analysis. Prefer monster/elite reward density while healthy, event/rest paths while "
+                    "injured, and route through shops when current gold makes a purchase likely."
+                ),
+                category="pathing",
+                priority=7,
+            ),
+            Skill(
+                id="team_coordination",
+                name="队友协作",
+                description="等待队友并根据其实际动作重新规划",
+                prompt_instruction=(
+                    "In multiplayer, account for teammate actions already completed this turn. Avoid duplicate lethal damage, "
+                    "redundant block, or consuming shared tactical opportunities."
+                ),
+                category="combat",
+                priority=9,
+            ),
         ]
         for skill in defaults:
             self._skills[skill.id] = skill
@@ -164,7 +208,7 @@ class SkillsRegistry:
             s.enabled = False
 
         presets = {
-            "balanced": [],
+            "balanced": ["focus_fire", "no_overkill", "adaptive_hp_trade", "deck_coherence", "adaptive_pathing", "team_coordination"],
             "aggressive": ["aggressive", "focus_fire", "no_overkill"],
             "defensive": ["block_when_attacked", "save_potions", "conserve_energy"],
             "setup": ["setup_first", "aoe_priority", "focus_fire"],

@@ -17,7 +17,7 @@ class DeepSeekClient(BaseLLMClient):
 
     API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "deepseek-chat"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "deepseek-v4-flash"):
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.model = model
         self.last_response = ""
@@ -37,6 +37,8 @@ class DeepSeekClient(BaseLLMClient):
             "messages": [
                 {"role": "user", "content": prompt},
             ],
+            # 实时打牌需要稳定返回最终动作；本地策略层已完成整回合枚举与评分。
+            "thinking": {"type": "disabled"},
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
@@ -52,6 +54,9 @@ class DeepSeekClient(BaseLLMClient):
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
+            if not content:
+                finish_reason = data["choices"][0].get("finish_reason", "unknown")
+                raise ValueError(f"empty model content (finish_reason={finish_reason})")
             self.last_response = content
             self.last_raw = json.dumps(data, indent=2)
         except Exception as e:
