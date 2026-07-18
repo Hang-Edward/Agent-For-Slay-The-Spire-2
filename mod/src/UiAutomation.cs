@@ -44,8 +44,13 @@ public static class UiStateReader
         try
         {
             var modal = NModalContainer.Instance?.OpenModal as Node;
-            if (modal != null && BuildGenericChoices(state, modal, "MODAL"))
-                return;
+            if (modal != null)
+            {
+                BuildGenericChoices(state, modal, "MODAL");
+                if (state.Options.Count > 0)
+                    return;
+                state.ScreenType = "";  // 无实际选项时清除 MODAL 标记，继续检查下层界面
+            }
         }
         catch (Exception ex) { ModLogger.Log($"Ui probe modal failed: {ex.Message}"); }
 

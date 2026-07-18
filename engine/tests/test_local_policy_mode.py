@@ -87,78 +87,76 @@ def test_agent_does_not_pause_after_completed_run_by_default():
     assert agent.event_bus.events == []
 
 
-def test_handle_restart_flow_singleplayer_first():
+def test_handle_restart_flow_starts_with_singleplayer():
+    """重启流程第一步：点单人模式。"""
     agent = object.__new__(AIAgent)
     agent.run_completed = True
-    agent.restart_flow_completed_run_id = "run-1"
     agent.restart_flow_phase = ""
     agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
 
-    decision = agent._handle_restart_flow({
-        "options": [
-            {"index": 0, "kind": "singleplayer", "name": "单人模式", "enabled": True},
-            {"index": 1, "kind": "character", "name": "IRONCLAD_button", "enabled": True},
-        ],
-    })
-
+    decision = agent._handle_restart_flow({"options": [{"index": 0, "kind": "singleplayer", "name": "单人模式", "enabled": True}]})
     assert decision is not None
     assert decision.option_index == 0
-    assert agent.restart_flow_phase == "singleplayer_selected"
+    assert agent.restart_flow_phase == "singleplayer"
 
 
-def test_handle_restart_flow_ironclad_after_singleplayer():
+def test_handle_restart_flow_standard_after_singleplayer():
+    """第二步：点标准模式。"""
     agent = object.__new__(AIAgent)
     agent.run_completed = True
-    agent.restart_flow_completed_run_id = "run-1"
-    agent.restart_flow_phase = "singleplayer_selected"
+    agent.restart_flow_phase = "singleplayer"
+    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
+
+    decision = agent._handle_restart_flow({"options": [{"index": 8, "kind": "singleplayer", "name": "标准模式", "enabled": True}]})
+    assert decision is not None
+    assert decision.option_index == 8
+    assert agent.restart_flow_phase == "standard"
+
+
+def test_handle_restart_flow_ironclad_after_standard():
+    """第三步：选铁甲战士。"""
+    agent = object.__new__(AIAgent)
+    agent.run_completed = True
+    agent.restart_flow_phase = "standard"
+    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
+
+    decision = agent._handle_restart_flow({"options": [{"index": 1, "kind": "character", "name": "IRONCLAD_button", "enabled": True}]})
+    assert decision is not None
+    assert decision.option_index == 1
+    assert agent.restart_flow_phase == "ironclad"
+
+
+def test_handle_restart_flow_confirm_after_ironclad():
+    """第四步：确认。"""
+    agent = object.__new__(AIAgent)
+    agent.run_completed = True
+    agent.restart_flow_phase = "ironclad"
     agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
 
     decision = agent._handle_restart_flow({
         "options": [
-            {"index": 0, "kind": "character", "id": "SILENT_button", "name": "SILENT_button", "enabled": True},
-            {"index": 1, "kind": "character", "id": "IRONCLAD_button", "name": "IRONCLAD_button", "enabled": True},
-            {"index": 2, "kind": "confirm", "id": "ConfirmButton", "name": "ConfirmButton", "enabled": True},
+            {"index": 7, "kind": "confirm", "name": "ConfirmButton", "enabled": True},
+            {"index": 8, "kind": "singleplayer", "name": "标准模式", "enabled": True},
         ],
     })
-
     assert decision is not None
-    assert decision.option_index == 1
-    assert agent.restart_flow_phase == "character_selected"
-
-
-def test_handle_restart_flow_confirm_after_character():
-    agent = object.__new__(AIAgent)
-    agent.run_completed = True
-    agent.restart_flow_completed_run_id = "run-1"
-    agent.restart_flow_phase = "character_selected"
-    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
-
-    decision = agent._handle_restart_flow({
-        "options": [
-            {"index": 0, "kind": "character", "id": "IRONCLAD_button", "name": "IRONCLAD_button", "enabled": True},
-            {"index": 1, "kind": "confirm", "id": "ConfirmButton", "name": "ConfirmButton", "enabled": True},
-        ],
-    })
-
-    assert decision is not None
-    assert decision.option_index == 1
+    assert decision.option_index == 8  # 标准模式优先
     assert agent.restart_flow_phase == "confirming"
 
 
-def test_handle_restart_flow_clears_flags_after_confirm():
+def test_handle_restart_flow_checks_game_restarted():
+    """_check_run_restarted 在画面切走后清除完成标志。"""
     agent = object.__new__(AIAgent)
     agent.run_completed = True
     agent.restart_flow_completed_run_id = "run-1"
-    agent.restart_flow_phase = "confirming"
-    agent.completion_pause_reported = True
-    agent.current_state_raw = {"screen_type": "MAIN_MENU", "in_combat": False}
 
-    decision = agent._handle_restart_flow({"options": []})
+    # 还处于 MAIN_MENU → 不清除
+    agent._check_run_restarted({"screen_type": "MAIN_MENU"})
+    assert agent.run_completed is True
 
-    assert decision is None
+    # 画面切到 COMBAT → 清除
+    agent._check_run_restarted({"screen_type": "COMBAT"})
     assert agent.run_completed is False
-    assert agent.completion_pause_reported is False
-    assert agent.restart_flow_completed_run_id == ""
 
 
 def test_local_policy_avoids_previously_executed_restart_action():

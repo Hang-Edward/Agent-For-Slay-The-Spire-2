@@ -39,6 +39,7 @@ from learning.experience_service import ExperienceService
 from learning.experience_store import ExperienceStore
 from learning.training_data_writer import TrainingDataWriter
 from policy.local_policy import LocalPolicy
+from policy.neural_policy import NeuralPolicy
 from teacher.deepseek_teacher import TeacherReviewService
 from telemetry.event_bus import DecisionEventBus
 
@@ -82,7 +83,7 @@ class AIAgent:
             print(f"ERROR: {e}")
             sys.exit(1)
         self.decision_mode = decision_mode
-        self.policy = LocalPolicy()
+        self.policy = NeuralPolicy()  # 模型存在就用神经网络，否则回退启发式
         self.teacher_enabled = False
         self.teacher_review_on_run_end = True
 
@@ -132,9 +133,9 @@ class AIAgent:
         self.current_battle_id = ""
         self.run_completed = False
         self.pause_after_run_completed = True
-        self.completion_pause_reported = False
         self.restart_flow_completed_run_id = ""
         self.restart_flow_phase = ""  # "" | "singleplayer_selected" | "character_selected" | "confirming"
+        self.card_select_pick_count = 0  # CARD_SELECT 连续选牌计数
         self.pending_transition: dict | None = None
         self.policy_version = "experience-v1"
 
@@ -232,12 +233,8 @@ class AIAgent:
             "snapshot_patch": {"game_state": raw_state},
         })
         self._complete_run_if_needed(raw_state)
+        self._check_run_restarted(raw_state)
         self.tui.update_state(state)
-        if self._should_pause_after_completed_run(raw_state):
-            self.tui.update_reasoning("Run completed; automation paused before starting another run")
-            self.tui.refresh()
-            time.sleep(0.3)
-            return
 
         handler = self.registry.get_handler_for_state(self.current_state_raw)
         if handler is not None:
@@ -272,6 +269,24 @@ class AIAgent:
             avoided = self.stalled_options.get(screen_id, set())
             if avoided:
                 state_data["stalled_option_indices"] = sorted(avoided)
+
+            # CARD_SELECT 防死循环：连续选牌超过 15 次时强制退出
+            if handler and handler.screen_type == "CARD_SELECT":
+                self.card_select_pick_count = getattr(self, "card_select_pick_count", 0) + 1
+                if self.card_select_pick_count > 15:
+                    # 尝试找非卡牌的选项（proceed/confirm）
+                    non_card = [o for o in state_data.get("options", [])
+                                if o.get("kind") not in ("card",) and o.get("enabled", True)]
+                    if non_card:
+                        pick = min(non_card, key=lambda o: int(o.get("index", 999)))
+                        self.tui.update_reasoning(f"[CARD_SELECT] forced exit via option {pick['index']}")
+                        self.client.post_decision(Decision.choose_option(int(pick["index"])))
+                        print(f"\n[CARD_SELECT] forced exit >15 picks, chose {pick['index']}")
+                        time.sleep(0.5)
+                        self.card_select_pick_count = 0
+                        return
+            else:
+                self.card_select_pick_count = 0
 
             # 重新开始流程：在局结束后逐阶段导航回新一局
             restart_decision = self._handle_restart_flow(state_data)
@@ -540,7 +555,11 @@ class AIAgent:
         self.restart_flow_phase = ""
 
     def _should_pause_after_completed_run(self, raw_state: dict) -> bool:
-        """一局结束后暂停自动动作，等回到主菜单再执行重新开始序列。"""
+        """一局结束后暂停自动动作，等回到主菜单再执行重新开始序列。
+
+        只在 MAIN_MENU 停止（此时走 restart_flow）。GAME_OVER 和 VICTORY
+        等中间屏幕让引擎正常点过去，不要暂停。
+        """
         if not getattr(self, "pause_after_run_completed", True):
             return False
         if not getattr(self, "run_completed", False):
@@ -548,11 +567,10 @@ class AIAgent:
         screen = raw_state.get("screen_type", "")
         if raw_state.get("in_combat", False) or screen == "COMBAT":
             return False
-        # 如果在主菜单且有完成态，进入重新开始流程
         if screen == "MAIN_MENU":
             return False  # 不暂停，走 restart_flow
-        # 非主菜单的结算界面 → 暂停等待
-        return True
+        # 其他结算界面（GAME_OVER / VICTORY / REWARDS）不暂停，正常点过去
+        return False
 
     def _choice_semantic_key(self, candidate: dict | None) -> str:
         if not candidate:
@@ -563,18 +581,21 @@ class AIAgent:
         ).lower()
 
     def _find_option(self, state_data: dict, *keywords: str) -> int | None:
-        """在选项中找匹配关键词的第一个可用选项。"""
-        for option in state_data.get("options", []):
-            if not option.get("enabled", True):
-                continue
-            text = self._choice_semantic_key(option)
-            for kw in keywords:
+        """按关键词优先级找可用选项。对每个关键词扫描全部选项，
+        优先匹配关键词顺序而非选项索引顺序。"""
+        for kw in keywords:
+            for option in state_data.get("options", []):
+                if not option.get("enabled", True):
+                    continue
+                text = self._choice_semantic_key(option)
                 if kw.lower() in text:
                     return int(option["index"])
         return None
 
     def _handle_restart_flow(self, state_data: dict) -> Decision | None:
-        """逐阶段执行"开始新一局"导航序列。"""
+        """重启流程：按顺序执行完整的开始新局序列。
+        相位：singleplayer → standard → ironclad → confirm
+        run_completed 由 _check_run_restarted 在画面切走后清除。"""
         if not getattr(self, "run_completed", False):
             return None
         raw = getattr(self, "current_state_raw", {}) or {}
@@ -584,44 +605,48 @@ class AIAgent:
 
         phase = getattr(self, "restart_flow_phase", "")
 
-        # 阶段 0: 点单人模式
+        # 0: 单人模式
         if not phase:
-            idx = self._find_option(state_data, "singleplayer", "单人模式")
-            if idx is not None:
-                self.restart_flow_phase = "singleplayer_selected"
-                return Decision.choose_option(idx)
-            return None
+            self.restart_flow_phase = "singleplayer"
+            return Decision.choose_option(0)
 
-        # 阶段 1: 选铁甲战士 或 确认
-        if phase == "singleplayer_selected":
-            idx = self._find_option(state_data, "ironclad", "铁甲")
-            if idx is not None:
-                self.restart_flow_phase = "character_selected"
-                return Decision.choose_option(idx)
-            # 可能在单人模式后已经显示了确认按钮
-            idx = self._find_option(state_data, "confirm", "标准模式", "standard", "embark")
+        # 1: 标准模式
+        if phase == "singleplayer":
+            self.restart_flow_phase = "standard"
+            return Decision.choose_option(8)
+
+        # 2: 铁甲战士
+        if phase == "standard":
+            self.restart_flow_phase = "ironclad"
+            return Decision.choose_option(1)
+
+        # 3: 确定 (标准模式或确认按钮)
+        if phase == "ironclad":
+            idx = self._find_option(state_data, "标准模式", "confirmbutton", "confirm")
             if idx is not None:
                 self.restart_flow_phase = "confirming"
                 return Decision.choose_option(idx)
-            return None
-
-        # 阶段 2: 确认开始
-        if phase in ("character_selected",):
-            idx = self._find_option(state_data, "confirm", "confirmbutton", "标准模式", "standard", "embark", "开始")
-            if idx is not None:
-                self.restart_flow_phase = "confirming"
-                return Decision.choose_option(idx)
-            return None
-
-        # 阶段 3: 开始后清除完成标志
-        if phase == "confirming":
-            self.run_completed = False
-            self.completion_pause_reported = False
-            self.restart_flow_completed_run_id = ""
+            # 找不到确认按钮就重新开始序列
             self.restart_flow_phase = ""
             return None
 
+        # 4: 等画面切走 (由 _check_run_restarted 处理)
+        if phase == "confirming":
+            return None
+
         return None
+
+    def _check_run_restarted(self, raw_state: dict) -> None:
+        """检测新一局是否已开始（画面从 MAIN_MENU 切走），清除完成标志。"""
+        if not getattr(self, "run_completed", False):
+            return
+        screen = raw_state.get("screen_type", "")
+        if screen in ("MAIN_MENU", "", "IDLE"):
+            return
+        # 画面已切走 → 新局已开始
+        self.run_completed = False
+        self.restart_flow_completed_run_id = ""
+        self.restart_flow_phase = ""
 
     def _request_teacher_review(self, raw_state: dict, result: str, terminal_reward: float) -> None:
         if not getattr(self, "teacher_review_on_run_end", False):

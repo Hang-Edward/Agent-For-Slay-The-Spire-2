@@ -178,15 +178,28 @@ class GenericChoiceHandler(DecisionHandler):
 
     def try_auto_decision(self, state_data: dict) -> Decision | None:
         enabled = [option for option in state_data["options"] if option.get("enabled", True)]
-        # 卡牌选择已产生选中项且确认按钮可用时，继续选牌只会造成界面空转。
         if state_data.get("screen_type", "").startswith("CARD_SELECT"):
-            has_selected_card = any(
-                option.get("kind") == "card" and option.get("selected", False)
-                for option in enabled
-            )
-            confirm = next((option for option in enabled if option.get("kind") == "confirm"), None)
-            if has_selected_card and confirm is not None:
+            # 找选中卡牌数量和确认/跳过按钮
+            cards = [o for o in enabled if o.get("kind") == "card"]
+            selected = [o for o in cards if o.get("selected", False)]
+            unselected = [o for o in cards if not o.get("selected", False)]
+            confirm = next((o for o in enabled if o.get("kind") in ("confirm", "proceed", "skip")), None)
+
+            # 已有选中牌并且有确认按钮 → 点确认
+            if selected and confirm is not None:
                 return Decision.choose_option(int(confirm["index"]))
+
+            # 有未选中的牌 → 选一张未选中的（避免反复选中取消同一张）
+            if unselected:
+                return Decision.choose_option(int(unselected[0]["index"]))
+
+            # 所有牌都已选中但没有确认按钮 → 点第一张可用牌
+            if cards:
+                return Decision.choose_option(int(cards[0]["index"]))
+
+            # 没有任何卡牌选项但有其他按钮 → 点第一个可用按钮
+            if enabled:
+                return Decision.choose_option(int(enabled[0]["index"]))
         if len(enabled) == 1:
             return Decision.choose_option(int(enabled[0]["index"]))
         return None
